@@ -14,6 +14,7 @@ type Config struct {
 	Master       Master        `yaml:"master"`
 	Xray         Xray          `yaml:"xray"`
 	Stats        Stats         `yaml:"stats"`
+	Update       Update        `yaml:"update"`
 	Heartbeat    time.Duration `yaml:"heartbeat_interval"` // 心跳间隔
 	ReconnectMax time.Duration `yaml:"reconnect_max"`      // 重连退避上限
 	// Phase T：内部账户与证书
@@ -39,6 +40,12 @@ type Stats struct {
 	APIAddr         string        `yaml:"api_addr"`         // xray gRPC 地址，如 127.0.0.1:10085
 	CollectInterval time.Duration `yaml:"collect_interval"` // 采集周期
 	ReportInterval  time.Duration `yaml:"report_interval"`  // 上报周期
+}
+
+// Update 自升级下载源（默认 GitHub: acdc-awa/XPanel-Node Releases）。
+type Update struct {
+	Repo   string `yaml:"repo"`   // owner/repo，空 = 内置默认
+	Mirror string `yaml:"mirror"` // github.com 的替代基址/代理前缀（可选，如 https://ghproxy.net/https://github.com）
 }
 
 // Default 返回内置默认值。

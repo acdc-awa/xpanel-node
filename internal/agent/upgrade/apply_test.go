@@ -3,8 +3,6 @@ package upgrade
 import (
 	"bytes"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,17 +15,11 @@ func TestApplyUpgradesBinary(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("old-binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	newData := []byte("new-binary")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Agent-Version", "v9.9.9")
-		w.Header().Set("X-Agent-Sha256", Sha256Hex(newData))
-		w.Write(newData)
-	}))
-	defer srv.Close()
+	_, f := newFakeGitHub(t, fakeRelease{Tag: "v9.9.9", Data: []byte("new-binary")})
 
 	restarted := false
 	var out bytes.Buffer
-	err := Apply(&Fetcher{BaseURL: srv.URL}, exePath, func() error { restarted = true; return nil }, &out)
+	err := Apply(f, exePath, func() error { restarted = true; return nil }, &out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,14 +41,10 @@ func TestApplySameVersionNoop(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("old"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Agent-Version", CurrentVersion()) // 与本地相同
-		w.Header().Set("X-Agent-Sha256", Sha256Hex([]byte("x")))
-		w.Write([]byte("x"))
-	}))
-	defer srv.Close()
+	// 与本地相同版本（dev）：不重下不重启
+	_, f := newFakeGitHub(t, fakeRelease{Tag: CurrentVersion(), Data: []byte("x")})
 
-	err := Apply(&Fetcher{BaseURL: srv.URL}, exePath, func() error { t.Error("不应重启"); return nil }, &bytes.Buffer{})
+	err := Apply(f, exePath, func() error { t.Error("不应重启"); return nil }, &bytes.Buffer{})
 	if !errors.Is(err, ErrUpToDate) {
 		t.Fatalf("err = %v, want ErrUpToDate", err)
 	}
@@ -72,14 +60,9 @@ func TestApplyShaMismatchRejects(t *testing.T) {
 	if err := os.WriteFile(exePath, []byte("old"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Agent-Version", "v2.0.0")
-		w.Header().Set("X-Agent-Sha256", "deadbeef") // 错误摘要
-		w.Write([]byte("corrupt"))
-	}))
-	defer srv.Close()
+	_, f := newFakeGitHub(t, fakeRelease{Tag: "v2.0.0", Data: []byte("corrupt"), BadSums: true})
 
-	err := Apply(&Fetcher{BaseURL: srv.URL}, exePath, func() error { t.Error("不应重启"); return nil }, &bytes.Buffer{})
+	err := Apply(f, exePath, func() error { t.Error("不应重启"); return nil }, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "sha256") {
 		t.Fatalf("err = %v, want sha256 错误", err)
 	}

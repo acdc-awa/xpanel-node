@@ -1,0 +1,38 @@
+name: release
+
+# 打 tag（v*）即发布：构建 linux/amd64 + linux/arm64，附 checksums.txt 与安装脚本。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: 构建双架构二进制
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME}"
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build \
+              -ldflags "-s -w -X github.com/acdc-awa/xpanel-node/internal/agent/upgrade.Version=${V}" \
+              -o "xray-agent-linux-${arch}" ./cmd/agent
+          done
+          sha256sum xray-agent-linux-* > checksums.txt
+          cat checksums.txt
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            xray-agent-linux-amd64
+            xray-agent-linux-arm64
+            checksums.txt
+            deploy/install-agent.sh
+          generate_release_notes: true

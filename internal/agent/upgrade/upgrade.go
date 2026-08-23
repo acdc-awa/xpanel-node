@@ -1,4 +1,8 @@
 // Package upgrade 提供 agent 自升级：版本查询/比较/下载/校验/替换（CLI 与未来 WS 推送共用）。
+//
+// 下载源：XPanel-Node 仓库的 GitHub Releases。版本查询走 /releases/latest 的
+// 重定向 Location（不调 REST API，规避匿名速率限制且兼容镜像站）；二进制与
+// checksums.txt 从 /releases/download/<tag>/ 拉取，sha256 必检。
 package upgrade
 
 import (
@@ -9,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +21,9 @@ import (
 
 // Version 当前 agent 版本（构建期 -ldflags -X 注入；"dev" 为默认开发值）。
 var Version = "dev"
+
+// DefaultRepo 默认发布仓库（XPanel-Node on GitHub）。
+const DefaultRepo = "acdc-awa/XPanel-Node"
 
 // CurrentVersion 返回当前 agent 版本。
 func CurrentVersion() string { return Version }
@@ -69,55 +77,103 @@ func Compare(a, b string) int {
 	return 0
 }
 
-// Fetcher 从主控下载 agent 二进制并解析版本/sha256 响应头。
+// Fetcher 从 GitHub Releases 查询版本并下载 agent 发布资产。
 type Fetcher struct {
-	BaseURL string // 主控 http(s) 地址，如 https://panel.example.com
-	Client  *http.Client
+	Repo   string // owner/repo，空 = DefaultRepo
+	Mirror string // 可选：github.com 的替代基址或代理前缀（如 https://ghproxy.net/https://github.com）
+	Client *http.Client
 }
 
-// Latest 返回主控当前 agent 版本（读 X-Agent-Version 头）。
+func (f *Fetcher) repo() string {
+	if f.Repo != "" {
+		return f.Repo
+	}
+	return DefaultRepo
+}
+
+// base 下载基址（Mirror 为空时为 https://github.com）。
+func (f *Fetcher) base() string {
+	if f.Mirror != "" {
+		return strings.TrimSuffix(f.Mirror, "/")
+	}
+	return "https://github.com"
+}
+
+func (f *Fetcher) httpClient() *http.Client {
+	if f.Client != nil {
+		return f.Client
+	}
+	return &http.Client{Timeout: 60 * time.Second}
+}
+
+// AssetName 当前平台的发布资产名（agent 运行于 Linux 节点，恒 linux-<arch>）。
+func AssetName() string { return "xray-agent-linux-" + runtime.GOARCH }
+
+// Latest 解析最新 release tag：GET /releases/latest 不跟随重定向，从 Location 取 tag。
 func (f *Fetcher) Latest() (string, error) {
-	resp, err := f.get()
+	cli := f.httpClient()
+	cli.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	url := f.base() + "/" + f.repo() + "/releases/latest"
+	resp, err := cli.Get(url)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	v := resp.Header.Get("X-Agent-Version")
-	if v == "" {
-		return "", fmt.Errorf("主控未提供 X-Agent-Version（非内嵌构建）")
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return "", fmt.Errorf("未找到最新 release（HTTP %d，无重定向）", resp.StatusCode)
 	}
-	return v, nil
+	const marker = "/releases/tag/"
+	i := strings.LastIndex(loc, marker)
+	if i < 0 {
+		return "", fmt.Errorf("无法从重定向解析版本: %s", loc)
+	}
+	tag := strings.TrimSpace(loc[i+len(marker):])
+	if tag == "" {
+		return "", fmt.Errorf("无法从重定向解析版本: %s", loc)
+	}
+	return tag, nil
 }
 
-// Download 下载二进制，返回数据与声明的 sha256（hex）。
-func (f *Fetcher) Download() ([]byte, string, error) {
-	resp, err := f.get()
+// Download 下载指定 tag 的资产与 checksums.txt，返回数据与期望 sha256（hex）。
+func (f *Fetcher) Download(tag string) ([]byte, string, error) {
+	base := f.base() + "/" + f.repo() + "/releases/download/" + tag
+	asset := AssetName()
+
+	data, err := f.getBytes(base + "/" + asset)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("下载 %s 失败: %w", asset, err)
 	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	sumsData, err := f.getBytes(base + "/checksums.txt")
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("下载 checksums.txt 失败（拒绝无校验升级）: %w", err)
 	}
-	return data, resp.Header.Get("X-Agent-Sha256"), nil
+	want := ""
+	for line := range strings.Lines(string(sumsData)) {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == asset {
+			want = fields[0]
+			break
+		}
+	}
+	if want == "" {
+		return nil, "", fmt.Errorf("checksums.txt 缺少 %s 条目（拒绝无校验升级）", asset)
+	}
+	return data, want, nil
 }
 
-// get 发起 GET 下载请求（头信息由 Download/Latest 复用）。
-func (f *Fetcher) get() (*http.Response, error) {
-	cli := f.Client
-	if cli == nil {
-		cli = &http.Client{Timeout: 60 * time.Second}
-	}
-	resp, err := cli.Get(f.BaseURL + "/api/v1/download/agent")
+func (f *Fetcher) getBytes(url string) ([]byte, error) {
+	resp, err := f.httpClient().Get(url)
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, fmt.Errorf("下载失败: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return resp, nil
+	return io.ReadAll(resp.Body)
 }
 
 // Sha256Hex 计算数据 sha256 的 hex 串。
@@ -126,26 +182,10 @@ func Sha256Hex(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// EnsureURL 把 ws(s) 地址转成 http(s)，并剥离 /api/ 之后的路径（与 install-agent.sh 的
-// ORIGIN 提取一致）：master.url 形如 ws://host/api/v1/node/ws，下载端点在其 origin 下。
-func EnsureURL(masterURL string) string {
-	u := masterURL
-	if i := strings.Index(u, "/api/"); i >= 0 {
-		u = u[:i]
-	}
-	switch {
-	case strings.HasPrefix(u, "wss://"):
-		return "https://" + strings.TrimPrefix(u, "wss://")
-	case strings.HasPrefix(u, "ws://"):
-		return "http://" + strings.TrimPrefix(u, "ws://")
-	}
-	return strings.TrimSuffix(u, "/")
-}
-
 // ErrUpToDate 已是最新版本。
 var ErrUpToDate = errors.New("已是最新版本")
 
-// Apply 完整升级流程：查版本 → 比较 → 下载 → sha256 校验 → 原子替换 → 重启。
+// Apply 完整升级流程：查版本 → 比较 → 下载 → sha256 强制校验 → 原子替换 → 重启。
 // exePath 为目标二进制路径（通常 os.Executable()）；restart 由调用方注入（systemd 重启或手动提示）。
 func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) error {
 	latest, err := f.Latest()
@@ -153,16 +193,16 @@ func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) erro
 		return err
 	}
 	if Compare(CurrentVersion(), latest) >= 0 {
-		fmt.Fprintf(out, "当前版本 %s，已是最新（主控: %s）\n", CurrentVersion(), latest)
+		fmt.Fprintf(out, "当前版本 %s，已是最新（远端: %s）\n", CurrentVersion(), latest)
 		return ErrUpToDate
 	}
 	fmt.Fprintf(out, "发现新版本 %s（当前 %s），开始升级...\n", latest, CurrentVersion())
 
-	data, wantSum, err := f.Download()
+	data, wantSum, err := f.Download(latest)
 	if err != nil {
 		return err
 	}
-	if wantSum != "" && !strings.EqualFold(wantSum, Sha256Hex(data)) {
+	if !strings.EqualFold(wantSum, Sha256Hex(data)) {
 		return fmt.Errorf("sha256 校验失败: 声明 %s 实际 %s", wantSum, Sha256Hex(data))
 	}
 

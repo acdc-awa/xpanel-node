@@ -6,16 +6,21 @@ master:
   secret: change-me   # 主控「新增服务器」时生成，仅展示一次
 
 xray:
-  bin: /home/zhx/XrayProject/tools/xray/xray-bin/xray
-  config_path: /tmp/xray-agent/config.json
-  log_path: /tmp/xray-agent/xray.log
-  pid_file: /tmp/xray-agent/xray.pid
+  bin: /usr/local/bin/xray
+  config_path: /etc/xray-agent/config.json
+  log_path: /var/log/xray-agent/xray.log
+  pid_file: /run/xray-agent/xray.pid
 
 # 流量采集：对应 xray 配置的 api 段（agent 通过 gRPC 查询 stats）
 stats:
   api_addr: 127.0.0.1:10085
   collect_interval: 30s
   report_interval: 60s
+
+# 自升级下载源（xray-agent upgrade；默认 GitHub acdc-awa/XPanel-Node Releases，均可不填）
+update:
+  # repo: acdc-awa/XPanel-Node   # owner/repo
+  # mirror: ""                    # github.com 替代基址/代理前缀，如 https://ghproxy.net/https://github.com
 
 heartbeat_interval: 30s
 reconnect_max: 60s
