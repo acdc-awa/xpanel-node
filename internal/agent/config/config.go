@@ -88,5 +88,20 @@ func Load(path string) (*Config, error) {
 	if cfg.Stats.APIAddr == "" {
 		return nil, fmt.Errorf("配置缺失 stats.api_addr")
 	}
+	// 数值域校验：duration 字段必须 > 0——0/负值会让 NewTicker 直接 panic、重连退避上限为 0 后紧密自旋
+	for _, c := range []struct {
+		path  string
+		value time.Duration
+		def   time.Duration
+	}{
+		{"heartbeat_interval", cfg.Heartbeat, 30 * time.Second},
+		{"reconnect_max", cfg.ReconnectMax, 60 * time.Second},
+		{"stats.collect_interval", cfg.Stats.CollectInterval, 30 * time.Second},
+		{"stats.report_interval", cfg.Stats.ReportInterval, 60 * time.Second},
+	} {
+		if c.value <= 0 {
+			return nil, fmt.Errorf("配置无效: %s 需大于 0（默认 %s）", c.path, c.def)
+		}
+	}
 	return cfg, nil
 }
