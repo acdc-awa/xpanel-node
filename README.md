@@ -8,10 +8,12 @@ XPanel 面板的被控节点 Agent：托管 Xray-core 进程，通过 WSS 长连
 
 ## 安装节点（推荐）
 
-在 XPanel 管理端「服务器」页新增节点，复制生成的一键安装命令到节点执行：
+在 XPanel 管理端「服务器」页新增节点，复制生成的一键安装命令到节点执行（安装脚本来自本仓库 GitHub Releases，`--master` 指向主控节点 WS 网关，对外路径为面板域名 `/node/ws`）：
 
 ```bash
-bash <(curl -fsSL <面板地址>/api/v1/download/install-agent.sh) --master <wss://.../api/v1/node/ws> --node-id <ID> --secret <SECRET>
+bash <(curl -fsSL https://github.com/acdc-awa/XPanel-Node/releases/latest/download/install-agent.sh) \
+  --master wss://<面板域名>/node/ws \
+  --node-id <ID> --secret <SECRET>
 ```
 
 脚本完成：从本仓库 GitHub Releases 下载 agent 二进制（sha256 强制校验）→ 安装 Xray-core（官方 Releases + .dgst 校验）→ 写 `/etc/xray-agent/config.yml`（0600）→ 注册 systemd 并启动。
