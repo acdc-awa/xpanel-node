@@ -60,28 +60,49 @@ func (p *Proc) TestConfig(path string) error {
 	return nil
 }
 
-// CleanupStale 停止同配置路径的残留 xray 实例（agent 异常退出遗留的孤儿进程）。
+// ownedPIDs 列出 cmdline 含本配置路径的 xray 实例 pid。
 // 用 pgrep -f 匹配完整 config_path（唯一），避免误杀；pgrep 自动排除自身。
-func (p *Proc) CleanupStale() {
+func (p *Proc) ownedPIDs() []int {
 	cmd := exec.Command("pgrep", "-f", p.ConfigPath)
 	out, err := cmd.Output()
 	if err != nil {
-		return // 无匹配（pgrep 无结果时 exit 1）
+		return nil // 无匹配（pgrep 无结果时 exit 1）
 	}
+	var pids []int
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		pid, perr := strconv.Atoi(strings.TrimSpace(line))
-		if perr != nil || pid <= 0 || pid == os.Getpid() {
-			continue
+		if perr == nil && pid > 0 && pid != os.Getpid() {
+			pids = append(pids, pid)
 		}
+	}
+	return pids
+}
+
+// pidOwned 校验 pid 是否属于本配置路径的 xray 实例（P1-2：防 pid 文件陈旧 + pid 复用误杀）。
+func (p *Proc) pidOwned(pid int) bool {
+	for _, owned := range p.ownedPIDs() {
+		if owned == pid {
+			return true
+		}
+	}
+	return false
+}
+
+// CleanupStale 停止同配置路径的残留 xray 实例（agent 异常退出遗留的孤儿进程）。
+func (p *Proc) CleanupStale() {
+	pids := p.ownedPIDs()
+	if len(pids) == 0 {
+		return
+	}
+	for _, pid := range pids {
 		_ = killProcess(pid, syscall.SIGTERM)
 	}
 	// 等待残留进程退出（最多 3s）
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		left := false
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			pid, perr := strconv.Atoi(strings.TrimSpace(line))
-			if perr == nil && pid > 0 && pid != os.Getpid() && isProcessAlive(pid) {
+		for _, pid := range pids {
+			if isProcessAlive(pid) {
 				left = true
 				break
 			}
@@ -140,6 +161,11 @@ func (p *Proc) Stop() error {
 
 	pid := p.pidFromFile()
 	if pid <= 0 {
+		_ = os.Remove(p.PidFile)
+		return nil
+	}
+	// P1-2：归属校验——pid 文件陈旧或 pid 已被系统复用给无关进程时，绝不误杀，仅清理陈旧文件
+	if !p.pidOwned(pid) {
 		_ = os.Remove(p.PidFile)
 		return nil
 	}
