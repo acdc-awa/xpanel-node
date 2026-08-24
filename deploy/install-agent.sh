@@ -3,7 +3,7 @@
 # XPanel-Node 一键安装脚本（主控-节点-用户三层中的「被控」）
 #
 # 用法：
-#   bash install-agent.sh --master <ws://host/api/v1/node/ws> --node-id <ID> --secret <SECRET> [选项]
+#   bash install-agent.sh --master <wss://面板域名/node/ws> --node-id <ID> --secret <SECRET> [选项]
 #
 # 选项：
 #   --master <url>       主控节点 ws 地址（生产用 wss://，由主控 Caddy 终止 TLS）

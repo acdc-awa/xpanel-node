@@ -6,8 +6,8 @@
 
 ## 1. 传输与帧格式
 
-- 传输：WebSocket。生产由主控侧 Caddy 终止 TLS（节点连 `wss://`，主控恒监听明文 `ws://`）。
-- 端点：`/api/v1/node/ws`。
+- 传输：WebSocket。生产由主控侧 Caddy 终止 TLS（节点连 `wss://`，主控 WS 网关端口恒监听明文 `ws://`）。
+- 端点：对外路径为面板域名 `/node/ws`（四端口模型，2026-08-24 起；Caddy `@ws` 规则分流到 WS 端口）。
 - 帧：JSON 文本帧，统一信封：
 
 ```json
