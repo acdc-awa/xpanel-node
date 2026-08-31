@@ -193,7 +193,10 @@ func (p *Proc) RestartWithConfig(configJSON string) error {
 	}
 	// U5（2026-08-14）：先 -test 后落盘——临时文件校验通过才原子替换，
 	// 避免坏配置覆盖磁盘上的好配置（xray 崩溃后 watchdog 用坏配置反复拉起失败，节点永久宕机）。
-	tmp := p.ConfigPath + ".tmp"
+	// 临时文件必须以 .json 结尾：xray 配置格式纯按扩展名判定（core/config.go
+	// GetFormatByExtension 仅认 json/jsonc/yaml/yml/toml/pb，无内容嗅探），
+	// 旧命名 .tmp 会让 -test 直接报 "Failed to get format"（实机 pending 悬挂的真正根因）。
+	tmp := strings.TrimSuffix(p.ConfigPath, ".json") + ".apply.json"
 	if err := os.WriteFile(tmp, []byte(configJSON), 0o644); err != nil {
 		return fmt.Errorf("写入临时配置失败: %w", err)
 	}
