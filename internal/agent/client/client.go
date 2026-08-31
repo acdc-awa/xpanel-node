@@ -155,13 +155,15 @@ func (c *Client) reportPending() {
 		c.restorePending(entries)
 		return
 	}
+	ws := c.ws
 	err := c.sendLocked(protocol.MsgTrafficReport, "", protocol.TrafficReportPayload{
 		Entries: entries,
 		Period:  period,
 	})
 	if err != nil {
-		log.Printf("agent: traffic_report 发送失败，保留待补报: %v", err)
+		log.Printf("agent: traffic_report 发送失败，保留待补报: %v（主动断开触发重连）", err)
 		c.restorePending(entries)
+		_ = ws.Close() // 写失败说明连接已坏：关闭唤醒读循环，避免僵尸连接
 	} else {
 		log.Printf("agent: 已上报流量 %d 条（period=%s）", len(entries), period)
 	}
@@ -222,7 +224,8 @@ func (c *Client) connectAndServe(ctx context.Context, backoff *time.Duration) er
 		return errAuthRejected
 	}
 	const (
-		pongWait = 60 * time.Second
+		// 主控 ping 间隔 54s（PongWait*9/10），90s 只靠 ping 续命、留足网络抖动余量
+		pongWait = 90 * time.Second
 	)
 	_ = ws.SetReadDeadline(time.Now().Add(pongWait))
 	ws.SetPingHandler(func(appData string) error {
@@ -230,8 +233,8 @@ func (c *Client) connectAndServe(ctx context.Context, backoff *time.Duration) er
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
 		if c.ws != nil {
-			_ = c.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			return c.ws.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(10*time.Second))
+			_ = c.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
+			return c.ws.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(writeTimeout))
 		}
 		return nil
 	})
@@ -258,7 +261,7 @@ func (c *Client) connectAndServe(ctx context.Context, backoff *time.Duration) er
 	// 心跳
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
-	go c.heartbeatLoop(hbCtx)
+	go c.heartbeatLoop(hbCtx, ws)
 
 	// 消息循环
 	for {
@@ -275,6 +278,9 @@ func (c *Client) connectAndServe(ctx context.Context, backoff *time.Duration) er
 }
 
 var errAuthRejected = &wsError{msg: "认证被拒绝"}
+
+// writeTimeout 单次 WebSocket 写超时（心跳/上报/回执/pong 统一使用）。
+const writeTimeout = 10 * time.Second
 
 type wsError struct{ msg string }
 
@@ -293,15 +299,19 @@ func (c *Client) send(typ, id string, payload any) error {
 var errNoConn = &wsError{msg: "未连接"}
 
 // sendLocked 写消息（调用方需持有 writeMu）。
+// gorilla 的写 deadline 是连接级持久状态（pong 回写的 WriteControl 设定后不复原），
+// 数据写必须每次显式重设，否则会继承 pong 留下的 10 秒绝对时间点——过期后所有
+// 心跳/上报瞬间失败且心跳循环静默退出，连接退化为只剩控制帧的僵尸并被中间层回收。
 func (c *Client) sendLocked(typ, id string, payload any) error {
 	data, err := protocol.Encode(typ, id, payload)
 	if err != nil {
 		return err
 	}
+	_ = c.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return c.ws.WriteMessage(websocket.TextMessage, data)
 }
 
-func (c *Client) heartbeatLoop(ctx context.Context) {
+func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 	ticker := time.NewTicker(c.Heartbeat)
 	defer ticker.Stop()
 	for {
@@ -330,7 +340,11 @@ func (c *Client) heartbeatLoop(ctx context.Context) {
 				TS:          time.Now().Unix(),
 			}
 			if err := c.send(protocol.MsgHeartbeat, "", hb); err != nil {
-				return // 连接已断，主循环会重连
+				// 写失败说明连接已坏：主动关闭唤醒阻塞中的读循环，让主循环立即重连，
+				// 而不是留下一条只进不出的僵尸连接（读侧要等 ping 超时才会发现）
+				log.Printf("agent: 心跳发送失败: %v（主动断开触发重连）", err)
+				_ = ws.Close()
+				return
 			}
 		}
 	}
