@@ -158,13 +158,19 @@ if [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 2>
   run curl -fL -o "$ZIP" "$URL"
   echo "==> 下载校验和"
   run curl -fL -o "${ZIP}.dgst" "${URL}.dgst"
-  # U22：sha256 校验必检——缺工具/缺条目/不匹配一律拒绝安装（不再静默跳过）
+  # U22：sha256 校验必检——缺工具/无法解析/不匹配一律拒绝安装（不再静默跳过）。
+  # .dgst 格式兼容三种（XTLS 各版本不一）：v26+ 键值格式（SHA2-256= <hash>）、
+  # BSD 格式（SHA256 (file) = hash）、标准 sha256sum 列表（hash filename）。
+  # 统一取第一个 64 位十六进制摘要（MD5/SHA1 位数不同不会被命中）。
   if ! command -v sha256sum >/dev/null 2>&1; then
     echo "缺少 sha256sum 工具，无法校验 xray 完整性（拒绝安装）"; exit 1
   fi
-  EXPECT=$(awk '/Xray-linux-64.zip/ {print $1}' "${ZIP}.dgst" | head -1)
+  EXPECT="$(grep -iE 'sha(2-)?256' "${ZIP}.dgst" | grep -oE '[0-9a-f]{64}' | head -1)"
   if [[ -z "$EXPECT" ]]; then
-    echo "校验和文件缺少 Xray-linux-64.zip 条目（拒绝安装）"; exit 1
+    EXPECT="$(grep -E 'Xray-linux-64.zip' "${ZIP}.dgst" | grep -oE '[0-9a-f]{64}' | head -1)"
+  fi
+  if [[ -z "$EXPECT" ]]; then
+    echo "校验和文件无法解析 sha256（需 SHA2-256 或 Xray-linux-64.zip 条目）（拒绝安装）"; exit 1
   fi
   ACTUAL=$(sha256sum "$ZIP" | awk '{print $1}')
   if [[ "$EXPECT" != "$ACTUAL" ]]; then
