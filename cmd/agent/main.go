@@ -75,6 +75,15 @@ func main() {
 	proc := xrayproc.New(cfg.Xray.Bin, cfg.Xray.ConfigPath, cfg.Xray.LogPath, cfg.Xray.PidFile)
 	proc.CleanupStale()
 
+	// 自举：无配置时写入内嵌最小模板（log + api gRPC inbound(127.0.0.1:10085) + stats 等），
+	// 保证 xray 装好即可启动、与 agent 的 gRPC 通信立即可用，不必等主控首次推送；
+	// 主控推送到达后 RestartWithConfig 无缝覆盖，watchdog 此后按既有逻辑保活。
+	if written, err := xrayproc.EnsureBootstrapConfig(cfg.Xray.ConfigPath); err != nil {
+		log.Printf("写入自举最小配置失败（xray 暂不启动，待主控推送配置）: %v", err)
+	} else if written {
+		log.Printf("已写入自举最小配置: %s", cfg.Xray.ConfigPath)
+	}
+
 	// 启动时若已有配置则拉起 xray（崩溃由 watchdog 保持）
 	if _, err := os.Stat(cfg.Xray.ConfigPath); err == nil {
 		if err := proc.Start(); err != nil {
