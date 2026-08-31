@@ -20,7 +20,7 @@ import (
 
 // commands 全部子命令与一句话说明（help 输出用）。
 var commands = map[string]string{
-	"run":       "启动 agent 主循环（默认行为）",
+	"run":       "启动 agent 主循环（默认行为；systemd 托管时需显式 run 强制前台）",
 	"status":    "查看 agent/xray/systemd 状态与配置摘要",
 	"restart":   "重启 agent 服务（systemd）或 xray 进程（手动）",
 	"logs":      "查看日志（systemd: journalctl；手动: xray 日志文件）",
@@ -177,7 +177,7 @@ func runStatus(rest []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "主控地址    : %s\n", cfg.Master.URL)
 	fmt.Fprintf(stdout, "节点 ID     : %s\n", cfg.Master.NodeID)
 
-	if isSystemdManaged() {
+	if IsSystemdManaged() {
 		fmt.Fprintf(stdout, "运行方式    : systemd\n")
 		active, _ := runCmd("systemctl", "is-active", "xray-agent")
 		enabled, _ := runCmd("systemctl", "is-enabled", "xray-agent")
@@ -235,7 +235,7 @@ func runRestart(rest []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if isSystemdManaged() {
+	if IsSystemdManaged() {
 		if err := runCmdErr("systemctl", "restart", "xray-agent"); err != nil {
 			fmt.Fprintln(stderr, "restart 失败:", err)
 			return 1
@@ -276,7 +276,7 @@ func runLogs(rest []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if isSystemdManaged() {
+	if IsSystemdManaged() {
 		jArgs := []string{"-u", "xray-agent", "--no-pager", "-n", strconv.Itoa(*lines)}
 		if *follow {
 			jArgs = append(jArgs, "-f")
@@ -382,12 +382,12 @@ func runUninstall(rest []string, stdin io.Reader, stdout, stderr io.Writer) int 
 
 	exe, _ := os.Executable()
 	mode := "手动"
-	if isSystemdManaged() {
+	if IsSystemdManaged() {
 		mode = "systemd"
 	}
 	fmt.Fprintf(stdout, "==> 停止服务（%s 模式）\n", mode)
 
-	if isSystemdManaged() {
+	if IsSystemdManaged() {
 		_ = runCmdErr("systemctl", "stop", "xray-agent")
 		_ = runCmdErr("systemctl", "disable", "xray-agent")
 		for _, p := range systemdUnitPaths {
@@ -456,7 +456,7 @@ func runUpgrade(rest []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	restart := func() error {
-		if isSystemdManaged() {
+		if IsSystemdManaged() {
 			return runCmdErr("systemctl", "restart", "xray-agent")
 		}
 		fmt.Fprintln(stdout, "手动模式：请手动重启 agent（systemctl restart xray-agent 或重新运行）")
@@ -474,13 +474,21 @@ func runUpgrade(rest []string, stdout, stderr io.Writer) int {
 
 // ---------- 工具 ----------
 
-func isSystemdManaged() bool {
+// IsSystemdManaged 判断本机是否安装了 xray-agent 的 systemd 单元（无论服务是否在运行）。
+func IsSystemdManaged() bool {
 	for _, p := range systemdUnitPaths {
 		if _, err := os.Stat(p); err == nil {
 			return true
 		}
 	}
 	return false
+}
+
+// IsSystemdService 判断当前进程是否由 systemd 拉起：服务进程带 INVOCATION_ID 环境变量，
+// 终端手动执行无此变量——用于区分「服务内启动」与「交互式误启动」。
+func IsSystemdService() bool {
+	_, ok := os.LookupEnv("INVOCATION_ID")
+	return ok
 }
 
 func confirm(r io.Reader, w io.Writer, prompt string) bool {

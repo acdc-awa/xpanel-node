@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -22,12 +23,26 @@ import (
 func main() {
 	// 管理子命令分派：xray-agent status|restart|logs|uninstall|help
 	args := os.Args[1:]
+	forcedRun := false
 	if len(args) > 0 && cli.IsSubcommand(args[0]) {
 		if args[0] == "run" {
+			forcedRun = true
 			os.Args = append([]string{os.Args[0]}, args[1:]...)
 		} else {
 			os.Exit(cli.Run(args, os.Stdin, os.Stdout, os.Stderr))
 		}
+	}
+
+	// 禁止裸启动第二个实例（实机互踢根因）：install-agent.sh 已装 systemd 单元时，
+	// 终端手动执行 xray-agent 直接给出管理提示退出；systemd 服务进程带 INVOCATION_ID
+	// 不受拦截，xray-agent run 仍可强制前台运行（调试/临时场景）。
+	if !forcedRun && !cli.IsSystemdService() && cli.IsSystemdManaged() {
+		fmt.Fprintln(os.Stderr, "xray-agent 已由 systemd 服务托管，请用 systemctl 管理：")
+		fmt.Fprintln(os.Stderr, "  systemctl status xray-agent      查看运行状态")
+		fmt.Fprintln(os.Stderr, "  systemctl restart xray-agent     重启服务")
+		fmt.Fprintln(os.Stderr, "  journalctl -u xray-agent         查看日志")
+		fmt.Fprintln(os.Stderr, "如需临时前台运行：先 systemctl stop xray-agent，再执行 xray-agent run")
+		os.Exit(0)
 	}
 
 	cfgPath := flag.String("config", "", "配置文件路径（默认探测 /etc/xray-agent/config.yml、二进制同目录下的 agent.yaml、或 ./agent.yaml）")
