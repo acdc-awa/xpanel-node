@@ -100,6 +100,11 @@ type InternalUUIDReportPayload struct {
 	UUID string `json:"uuid"`
 }
 
+// UpgradeAgentPayload 主控→节点：升级 agent 二进制。Target 为空 = 拉取最新 release。
+type UpgradeAgentPayload struct {
+	Target string `json:"target,omitempty"`
+}
+
 // ResultPayload 指令回执（id 回填请求 ID）。
 type ResultPayload struct {
 	OK    bool   `json:"ok"`

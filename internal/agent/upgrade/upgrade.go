@@ -185,6 +185,25 @@ func Sha256Hex(data []byte) string {
 // ErrUpToDate 已是最新版本。
 var ErrUpToDate = errors.New("已是最新版本")
 
+// ReplaceBinary 原子替换二进制文件：写入同目录 .tmp → chmod 0755 → rename 覆盖。
+// 失败时清理 .tmp。CLI 升级与 WS 触发升级共用。
+func ReplaceBinary(exePath string, data []byte) error {
+	tmp := exePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o755); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, exePath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // Apply 完整升级流程：查版本 → 比较 → 下载 → sha256 强制校验 → 原子替换 → 重启。
 // exePath 为目标二进制路径（通常 os.Executable()）；restart 由调用方注入（systemd 重启或手动提示）。
 func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) error {
@@ -206,17 +225,7 @@ func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) erro
 		return fmt.Errorf("sha256 校验失败: 声明 %s 实际 %s", wantSum, Sha256Hex(data))
 	}
 
-	tmp := exePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o755); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Chmod(tmp, 0o755); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, exePath); err != nil {
-		os.Remove(tmp)
+	if err := ReplaceBinary(exePath, data); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "二进制已替换（%s）\n", exePath)

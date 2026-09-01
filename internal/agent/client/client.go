@@ -4,9 +4,13 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -48,11 +52,17 @@ type Client struct {
 	// Phase T：内部账户存储 + 证书落盘目录
 	Accounts *accounts.Store
 	CertsDir string
+	// Upgrade 升级源（repo/mirror 来自节点配置 update 段）；nil = 面板触发升级不可用。
+	// SelfRestart 升级完成后的重启回调（systemd 服务内由 main 注入 systemctl restart）；
+	// nil = 手动运行模式，替换后仅提示手动重启。
+	Upgrade     *upgrade.Fetcher
+	SelfRestart func() error
 
 	ws        *websocket.Conn
 	writeMu   sync.Mutex // 保护 ws 写（心跳/上报/回执并发）
 	pendingMu sync.Mutex
 	pending   map[trafficKey]*pendingEntry // by (email, inboundTag) 维度键
+	upgrading atomic.Bool                  // 面板触发升级进行中（防并发重复触发）
 }
 
 // Run 常驻运行：流量采集上报 + 连接/服务/重连。
@@ -432,8 +442,81 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		return c.handleInternalAccount(m, m.Type == protocol.MsgRotateInternalAccount)
 	case protocol.MsgPushCert:
 		return c.handlePushCert(m)
+	case protocol.MsgUpgradeAgent:
+		return c.handleUpgradeAgent(m)
 	default:
 		return nil
+	}
+}
+
+// handleUpgradeAgent 面板触发的自升级：同步做版本检查（快速失败、立即回执），
+// 下载/替换放后台 goroutine（从 GitHub 拉二进制可达数分钟，不能阻塞读循环导致
+// 心跳/pong 停摆被主控回收）。成功路径在回执发出后触发重启——systemctl restart
+// 会终止本进程，若等重启完成再回执则回执永远发不出去。
+func (c *Client) handleUpgradeAgent(m *protocol.Message) *protocol.ResultPayload {
+	if c.Upgrade == nil {
+		return &protocol.ResultPayload{OK: false, Error: "节点未配置升级源（update.repo/mirror）"}
+	}
+	var p protocol.UpgradeAgentPayload
+	_ = m.PayloadTo(&p)
+	if !c.upgrading.CompareAndSwap(false, true) {
+		return &protocol.ResultPayload{OK: false, Error: "升级正在进行中，请稍候"}
+	}
+	target := p.Target
+	if target == "" {
+		latest, err := c.Upgrade.Latest()
+		if err != nil {
+			c.upgrading.Store(false)
+			return &protocol.ResultPayload{OK: false, Error: "查询最新版本失败: " + err.Error()}
+		}
+		target = latest
+	}
+	if upgrade.Compare(upgrade.CurrentVersion(), target) >= 0 {
+		c.upgrading.Store(false)
+		return &protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已是最新版本 %s（远端 %s）", upgrade.CurrentVersion(), target)}
+	}
+	go c.runUpgrade(m.ID, target)
+	return nil // 回执由 runUpgrade 在下载/替换完成后发送
+}
+
+// runUpgrade 后台执行下载 → sha256 校验 → 原子替换，随后先发回执再触发重启。
+func (c *Client) runUpgrade(reqID, target string) {
+	defer c.upgrading.Store(false)
+	from := upgrade.CurrentVersion()
+	reply := func(res protocol.ResultPayload) {
+		if err := c.send(protocol.MsgResult, reqID, res); err != nil {
+			log.Printf("agent: upgrade_agent 回执发送失败: %v", err)
+		}
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		reply(protocol.ResultPayload{OK: false, Error: "获取自身路径失败: " + err.Error()})
+		return
+	}
+	data, wantSum, err := c.Upgrade.Download(target)
+	if err != nil {
+		reply(protocol.ResultPayload{OK: false, Error: err.Error()})
+		return
+	}
+	if !strings.EqualFold(wantSum, upgrade.Sha256Hex(data)) {
+		reply(protocol.ResultPayload{OK: false, Error: fmt.Sprintf("sha256 校验失败: 声明 %s 实际 %s", wantSum, upgrade.Sha256Hex(data))})
+		return
+	}
+	if err := upgrade.ReplaceBinary(exe, data); err != nil {
+		reply(protocol.ResultPayload{OK: false, Error: "替换二进制失败: " + err.Error()})
+		return
+	}
+	log.Printf("agent: 二进制已升级 %s → %s（%s）", from, target, exe)
+
+	if c.SelfRestart == nil {
+		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s；当前为手动运行模式，请手动重启 agent 进程加载新版本", from, target)})
+		return
+	}
+	reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s，节点正在重启", from, target)})
+	// 回执已写出，此刻才允许重启杀掉自己；失败仅记录（新二进制已就位，旧进程继续跑）
+	if err := c.SelfRestart(); err != nil {
+		log.Printf("agent: 自重启失败（新二进制已就位，可手动 systemctl restart xray-agent）: %v", err)
 	}
 }
 

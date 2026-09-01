@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/acdc-awa/xpanel-node/internal/agent/collector"
 	"github.com/acdc-awa/xpanel-node/internal/agent/config"
 	"github.com/acdc-awa/xpanel-node/internal/agent/stats"
+	"github.com/acdc-awa/xpanel-node/internal/agent/upgrade"
 	"github.com/acdc-awa/xpanel-node/internal/agent/xrayproc"
 )
 
@@ -98,6 +100,14 @@ func main() {
 
 	statsCollector := stats.New(cfg.Stats.APIAddr)
 
+	// 面板触发自升级的重启回调：仅 systemd 服务内启动时可自重启（systemctl restart
+	// 会 SIGTERM 本进程，服务重启拉起新二进制）；手动运行时无重启手段，升级回执里提示手动。
+	// 必须在下面 `cli :=` 声明之前定义——此后标识符 cli 指向变量而非本包。
+	var selfRestart func() error
+	if cli.IsSystemdService() {
+		selfRestart = func() error { return exec.Command("systemctl", "restart", "xray-agent").Run() }
+	}
+
 	cli := &client.Client{
 		BaseURL:         cfg.Master.URL,
 		NodeID:          cfg.Master.NodeID,
@@ -111,6 +121,8 @@ func main() {
 		ReportInterval:  cfg.Stats.ReportInterval,
 		Accounts:        accounts.New(cfg.AccountsPath),
 		CertsDir:        cfg.CertsDir,
+		Upgrade:         &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror},
+		SelfRestart:     selfRestart,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

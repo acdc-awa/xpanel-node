@@ -46,6 +46,7 @@
 | `setup_internal_account` | SetupInternalAccountPayload | 为 relay 入站生成内部 UUID，回 `result`（data 为 SetupInternalResult） |
 | `rotate_internal_account` | SetupInternalAccountPayload | 重新生成内部 UUID |
 | `push_cert` | PushCertPayload | TLS 证书下发（agent 校验 PEM 匹配后落盘） |
+| `upgrade_agent` | UpgradeAgentPayload | 触发 agent 自升级到最新 release（见 §5 时序），回 `result`（data 为升级结果文本） |
 
 ## 4. 载荷结构
 
@@ -69,6 +70,7 @@ SetupInternalAccountPayload { tag }
 SetupInternalResult         { tag, uuid }          // uuid 由节点生成，主控以此覆盖 DB
 PushCertPayload    { domain, cert_pem, key_pem }
 InternalUUIDReportPayload { tag, uuid }
+UpgradeAgentPayload { target? }              // 空 = 拉取最新 release
 ResultPayload      { ok, error?, data? }
 StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at? }
 ```
@@ -79,10 +81,11 @@ StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at? 
 - **流量上报**：默认 60s 一次，主控落 `traffic_logs` 并按周期聚合。
 - **配置下发**：`push_config` → 节点 `xray -test` 校验 → 落盘 → 重启 xray → `result` 回执（失败自动回滚旧配置）。
 - **用户热更新**：`sync_users` → gRPC AlterInbound 增删用户（不重启 xray）→ `result` 回执。
+- **自升级**：`upgrade_agent` → 节点先同步查最新版本（快路径，已是最新/查询失败立即回执）→ 后台从 GitHub Releases 下载二进制 + checksums.txt（sha256 强制校验）→ 原子替换自身 → **先发 `result` 回执再重启**（systemd 服务内 `systemctl restart` 会终止本进程，若等重启完成再回执则回执永远发不出去）。主控侧等待回执超时应远大于常规指令（面板用 5 分钟）。
 - **断线重连**：节点指数退避重连（上限默认 60s）；主控侧离线期间的配置变更在重连后自动补推。
 
 ## 6. 版本兼容
 
 - 主控与 agent 各自独立发版（agent tag 即发布版本，如 `v0.1.0`）。
 - 兼容策略：协议**只增不删**；新增字段必须 `omitempty`；旧 agent 可连新主控（缺省字段走主控默认值/保留旧值）。
-- `upgrade_agent`（主控推送升级指令）为预留消息类型，尚未实现；当前升级为节点侧 CLI `xray-agent upgrade` 主动拉取 GitHub Releases。
+- `upgrade_agent` 于面板端触发（服务器页「升级」）；不支持该指令的旧 agent 收到后不回应，主控侧表现为等待回执超时。节点侧 CLI `xray-agent upgrade` 主动拉取升级仍然保留，两条路径共用 `internal/agent/upgrade` 的下载/校验/替换逻辑。
