@@ -24,9 +24,6 @@ func New(path string) *Store {
 	return &Store{path: path}
 }
 
-// Path 返回存储文件路径。
-func (s *Store) Path() string { return s.path }
-
 // Load 读取全部账户（文件不存在返回空 map；损坏文件返回错误，不静默覆盖）。
 func (s *Store) Load() (map[string]string, error) {
 	s.mu.Lock()
@@ -58,21 +55,6 @@ func (s *Store) Set(tag, uuid string) error {
 		return err
 	}
 	m[tag] = uuid
-	return s.saveLocked(m)
-}
-
-// Remove 删除 tag（文件已存在时幂等；删除后仍落盘）。
-func (s *Store) Remove(tag string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	m, err := s.loadLocked()
-	if err != nil {
-		return err
-	}
-	if _, ok := m[tag]; !ok {
-		return nil
-	}
-	delete(m, tag)
 	return s.saveLocked(m)
 }
 

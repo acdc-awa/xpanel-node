@@ -92,29 +92,6 @@ func TestStoreCorruptFile(t *testing.T) {
 	}
 }
 
-func TestStoreRemove(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "accounts.json"))
-	if err := s.Set("a", "u1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Set("b", "u2"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Remove("a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Remove("a"); err != nil { // 幂等
-		t.Fatal(err)
-	}
-	m, _ := s.Load()
-	if _, ok := m["a"]; ok {
-		t.Error("a 应被删除")
-	}
-	if m["b"] != "u2" {
-		t.Error("b 应保留")
-	}
-}
-
 var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func TestNewUUID(t *testing.T) {

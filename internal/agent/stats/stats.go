@@ -66,13 +66,6 @@ func (c *Collector) OnlineUsers() int {
 	return c.online
 }
 
-// Connect 建立 gRPC 连接（xray 重启后需重新连接）。
-func (c *Collector) Connect() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.connectLocked()
-}
-
 // connectLocked 建立 gRPC 连接（调用方须持有 mu）。
 func (c *Collector) connectLocked() error {
 	if c.client != nil && c.handler != nil {
