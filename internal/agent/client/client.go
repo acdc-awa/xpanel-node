@@ -26,6 +26,13 @@ type pendingEntry struct {
 	Down int64
 }
 
+// trafficKey pending 聚合键：用户维度 (email, "")，入站维度 ("", tag)——两个维度
+// 来自 xray 不同的计数器族，互不合并。
+type trafficKey struct {
+	email   string
+	inbound string
+}
+
 // Client 节点端客户端。
 type Client struct {
 	BaseURL         string // ws://host/api/v1/node/ws
@@ -45,12 +52,12 @@ type Client struct {
 	ws        *websocket.Conn
 	writeMu   sync.Mutex // 保护 ws 写（心跳/上报/回执并发）
 	pendingMu sync.Mutex
-	pending   map[string]*pendingEntry // by email
+	pending   map[trafficKey]*pendingEntry // by (email, inboundTag) 维度键
 }
 
 // Run 常驻运行：流量采集上报 + 连接/服务/重连。
 func (c *Client) Run(ctx context.Context) {
-	c.pending = make(map[string]*pendingEntry)
+	c.pending = make(map[trafficKey]*pendingEntry)
 	go c.collectLoop(ctx)
 	go c.reportLoop(ctx)
 
@@ -98,14 +105,15 @@ func (c *Client) collectLoop(ctx context.Context) {
 				total += e.Up + e.Down
 			}
 			if total > 0 {
-				log.Printf("agent: 采集到流量 delta=%d 字节（%d 用户）", total, len(entries))
+				log.Printf("agent: 采集到流量 delta=%d 字节（%d 条）", total, len(entries))
 			}
 			c.pendingMu.Lock()
 			for _, e := range entries {
-				p, ok := c.pending[e.Email]
+				k := trafficKey{email: e.Email, inbound: e.Inbound}
+				p, ok := c.pending[k]
 				if !ok {
 					p = &pendingEntry{}
-					c.pending[e.Email] = p
+					c.pending[k] = p
 				}
 				p.Up += e.Up
 				p.Down += e.Down
@@ -136,17 +144,18 @@ func (c *Client) reportPending() {
 		return
 	}
 	entries := make([]protocol.TrafficEntry, 0, len(c.pending))
-	for email, p := range c.pending {
+	for k, p := range c.pending {
 		entries = append(entries, protocol.TrafficEntry{
-			UserID:    0, // 主控按 email 匹配 user_id
-			Email:     email,
+			UserID:    0, // 用户维度主控按 email 匹配；入站维度（Inbound 非空）主控只累计入站计数
+			Email:     k.email,
+			Inbound:   k.inbound,
 			UpBytes:   p.Up,
 			DownBytes: p.Down,
 		})
 	}
 	period := time.Now().UTC().Format(time.RFC3339)
 	// 清空 pending（发送失败再放回）
-	c.pending = make(map[string]*pendingEntry)
+	c.pending = make(map[trafficKey]*pendingEntry)
 	c.pendingMu.Unlock()
 
 	c.writeMu.Lock()
@@ -174,11 +183,11 @@ func (c *Client) restorePending(entries []protocol.TrafficEntry) {
 	c.pendingMu.Lock()
 	defer c.pendingMu.Unlock()
 	for _, e := range entries {
-		key := e.Email
-		p, ok := c.pending[key]
+		k := trafficKey{email: e.Email, inbound: e.Inbound}
+		p, ok := c.pending[k]
 		if !ok {
 			p = &pendingEntry{}
-			c.pending[key] = p
+			c.pending[k] = p
 		}
 		p.Up += e.UpBytes
 		p.Down += e.DownBytes

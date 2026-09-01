@@ -23,15 +23,20 @@ import (
 	"github.com/acdc-awa/xpanel-node/pkg/protocol"
 )
 
-// Entry 单个用户本周期流量增量。
+// Entry 单条流量增量（用户维度 Email / 入站维度 Inbound 二选一）。
 type Entry struct {
-	Email string
-	Up    int64
-	Down  int64
+	Email   string
+	Inbound string
+	Up      int64
+	Down    int64
 }
 
 // user 计数器命名：user>>>email>>>traffic>>>(uplink|downlink)
 var userRe = regexp.MustCompile(`^user>>>(.+?)>>>traffic>>>(uplink|downlink)$`)
+
+// inbound 计数器命名：inbound>>>tag>>>traffic>>>(uplink|downlink)
+// （主控模板 policy.system.statsInboundUplink/Downlink 开启后产出）。
+var inboundRe = regexp.MustCompile(`^inbound>>>(.+?)>>>traffic>>>(uplink|downlink)$`)
 
 // online 计数器命名：user>>>email>>>online（xray stats 中的在线连接计数）。
 var onlineRe = regexp.MustCompile(`^user>>>.*>>>online$`)
@@ -216,7 +221,7 @@ func (c *Collector) SyncUsers(ctx context.Context, targetUsers map[string][]prot
 	return nil
 }
 
-// Collect 拉取全量计数器并返回自上次以来的用户流量增量。
+// Collect 拉取全量计数器并返回自上次以来的流量增量（用户维度 + 入站维度两个计数器族）。
 // 若 xray 未运行/连接失败返回 error，由调用方决定重连。
 func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 	c.mu.Lock()
@@ -243,10 +248,11 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 	}
 	c.online = online
 
-	// 先建基线：首次调用只记录当前值，不产出增量
+	// 先建基线：首次调用只记录当前值，不产出增量（user/inbound 两个计数器族都必须
+	// 入基线，否则首个周期会把节点历史总流量误报为本周期增量）
 	if !c.baseline {
 		for _, st := range resp.Stat {
-			if userRe.MatchString(st.Name) {
+			if userRe.MatchString(st.Name) || inboundRe.MatchString(st.Name) {
 				c.last[st.Name] = st.Value
 			}
 		}
@@ -254,46 +260,66 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 		return nil, nil
 	}
 
-	up := make(map[string]int64)
-	down := make(map[string]int64)
+	up, down := make(map[string]int64), make(map[string]int64)     // 用户维度：email → 字节
+	inUp, inDown := make(map[string]int64), make(map[string]int64) // 入站维度：tag → 字节
 	seen := make(map[string]bool)
-	for _, st := range resp.Stat {
-		m := userRe.FindStringSubmatch(st.Name)
-		if m == nil {
-			continue
-		}
-		email, dir := m[1], m[2]
-		seen[st.Name] = true
-		cur := st.Value
-		prev, ok := c.last[st.Name]
-		delta := cur
-		if ok && cur >= prev {
-			delta = cur - prev // 正常增量
-		}
-		// ok && cur < prev：xray 重启计数器归零，delta=cur 视为从 0 开始
-		c.last[st.Name] = cur
-		if dir == "uplink" {
-			up[email] += delta
-		} else {
-			down[email] += delta
+	accumulate := func(re *regexp.Regexp, upMap, downMap map[string]int64) {
+		for _, st := range resp.Stat {
+			m := re.FindStringSubmatch(st.Name)
+			if m == nil {
+				continue
+			}
+			seen[st.Name] = true
+			cur := st.Value
+			prev, ok := c.last[st.Name]
+			delta := cur
+			if ok && cur >= prev {
+				delta = cur - prev // 正常增量
+			}
+			// ok && cur < prev：xray 重启计数器归零，delta=cur 视为从 0 开始
+			c.last[st.Name] = cur
+			if m[2] == "uplink" {
+				upMap[m[1]] += delta
+			} else {
+				downMap[m[1]] += delta
+			}
 		}
 	}
-	// 清理已消失的计数器（删除了用户），防止泄漏
+	accumulate(userRe, up, down)
+	accumulate(inboundRe, inUp, inDown)
+	// 清理已消失的计数器（删除了用户/入站），防止泄漏
 	for name := range c.last {
 		if !seen[name] {
 			delete(c.last, name)
 		}
 	}
 
-	entries := make([]Entry, 0, len(up))
-	for email, u := range up {
-		entries = append(entries, Entry{Email: email, Up: u, Down: down[email]})
-	}
-	// 仅上报有流量的（down 单独有流量而 up 为 0 的情况）
-	for email, d := range down {
-		if up[email] == 0 && d > 0 {
-			entries = append(entries, Entry{Email: email, Up: 0, Down: d})
+	entries := make([]Entry, 0, len(up)+len(inUp))
+	appendDelta := func(dst []Entry, upMap, downMap map[string]int64, inbound bool) []Entry {
+		for key, u := range upMap {
+			e := Entry{Up: u, Down: downMap[key]}
+			if inbound {
+				e.Inbound = key
+			} else {
+				e.Email = key
+			}
+			dst = append(dst, e)
 		}
+		// 仅上报有流量的（down 单独有流量而 up 为 0 的情况）
+		for key, d := range downMap {
+			if upMap[key] == 0 && d > 0 {
+				e := Entry{Up: 0, Down: d}
+				if inbound {
+					e.Inbound = key
+				} else {
+					e.Email = key
+				}
+				dst = append(dst, e)
+			}
+		}
+		return dst
 	}
+	entries = appendDelta(entries, up, down, false)
+	entries = appendDelta(entries, inUp, inDown, true)
 	return entries, nil
 }

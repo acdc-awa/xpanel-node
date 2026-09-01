@@ -25,8 +25,10 @@ type HeartbeatPayload struct {
 	TS          int64   `json:"ts"`           // unix 秒
 }
 
-// TrafficEntry 单条流量记录。
-// P2：UserID=0 时主控按 Email 匹配用户；P5 接入入站维度后可填 Inbound。
+// TrafficEntry 单条流量记录。两个维度互斥：
+// 用户维度——Email 填邮箱（UserID=0 时主控按 Email 匹配用户），落 traffic_logs；
+// 入站维度——Inbound 填入站 tag 且 Email 留空，主控仅累计 inbounds.up/down 冗余计数器
+// （dashboard 节点流量占比/入站限额消费），不落用户流水防 KPI 双计（2026-09-01 接通）。
 type TrafficEntry struct {
 	UserID    uint64 `json:"user_id"`
 	Email     string `json:"email,omitempty"`
