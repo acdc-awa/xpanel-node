@@ -330,8 +330,12 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 		case <-ticker.C:
 			snap := c.Collector.Snapshot()
 			onlineUsers := 0
+			var onlineIPs []protocol.OnlineUserIPs
 			if c.Stats != nil {
 				onlineUsers = c.Stats.OnlineUsers()
+				for _, u := range c.Stats.OnlineSnapshot() {
+					onlineIPs = append(onlineIPs, protocol.OnlineUserIPs{Email: u.Email, IPs: u.IPs})
+				}
 			}
 			hb := protocol.HeartbeatPayload{
 				CPU:         snap.CPU,
@@ -341,6 +345,7 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 				DiskTotal:   snap.DiskTotal,
 				XrayRunning: c.Xray.IsRunning(),
 				OnlineUsers: onlineUsers,
+				OnlineIPs:   onlineIPs,
 				RxRate:      snap.RxRate,
 				TxRate:      snap.TxRate,
 				RxBytes:     snap.RxBytes,

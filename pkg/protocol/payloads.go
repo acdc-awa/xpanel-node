@@ -10,19 +10,27 @@ type AuthPayload struct {
 
 // HeartbeatPayload 心跳与节点状态。
 type HeartbeatPayload struct {
-	CPU         float64 `json:"cpu"`          // 百分比
-	Mem         float64 `json:"mem"`          // 已用内存（字节）
-	MemTotal    float64 `json:"mem_total"`    // 总内存（字节）
-	Disk        float64 `json:"disk"`         // 已用磁盘（字节）
-	DiskTotal   float64 `json:"disk_total"`   // 总磁盘（字节）
-	XrayRunning bool    `json:"xray_running"` // xray 是否在运行
-	OnlineUsers int     `json:"online_users"` // 在线用户数（P2 流量接入后填）
-	RxRate      float64 `json:"rx_rate"`      // 实时速率（字节/秒）
-	TxRate      float64 `json:"tx_rate"`
-	RxBytes     uint64  `json:"rx_bytes"`     // 累计物理网卡接收字节
-	TxBytes     uint64  `json:"tx_bytes"`     // 累计物理网卡发送字节
-	Version     string  `json:"version,omitempty"` // agent 版本（旧 agent 不上报）
-	TS          int64   `json:"ts"`           // unix 秒
+	CPU         float64         `json:"cpu"`                  // 百分比
+	Mem         float64         `json:"mem"`                  // 已用内存（字节）
+	MemTotal    float64         `json:"mem_total"`            // 总内存（字节）
+	Disk        float64         `json:"disk"`                 // 已用磁盘（字节）
+	DiskTotal   float64         `json:"disk_total"`           // 总磁盘（字节）
+	XrayRunning bool            `json:"xray_running"`         // xray 是否在运行
+	OnlineUsers int             `json:"online_users"`         // 在线用户数（当前活跃连接的去重用户）
+	OnlineIPs   []OnlineUserIPs `json:"online_ips,omitempty"` // 每用户在线连接源 IP 快照（xray OnlineMap）
+	RxRate      float64         `json:"rx_rate"`              // 实时速率（字节/秒）
+	TxRate      float64         `json:"tx_rate"`
+	RxBytes     uint64          `json:"rx_bytes"`          // 累计物理网卡接收字节
+	TxBytes     uint64          `json:"tx_bytes"`          // 累计物理网卡发送字节
+	Version     string          `json:"version,omitempty"` // agent 版本（旧 agent 不上报）
+	TS          int64           `json:"ts"`                // unix 秒
+}
+
+// OnlineUserIPs 单个用户当前活跃连接的去重源 IP（refcount 快照，连接断开即移除；
+// 127.0.0.1/::1 不计入）。
+type OnlineUserIPs struct {
+	Email string   `json:"email"`
+	IPs   []string `json:"ips,omitempty"`
 }
 
 // TrafficEntry 单条流量记录。两个维度互斥：

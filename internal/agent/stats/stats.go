@@ -38,8 +38,11 @@ var userRe = regexp.MustCompile(`^user>>>(.+?)>>>traffic>>>(uplink|downlink)$`)
 // （主控模板 policy.system.statsInboundUplink/Downlink 开启后产出）。
 var inboundRe = regexp.MustCompile(`^inbound>>>(.+?)>>>traffic>>>(uplink|downlink)$`)
 
-// online 计数器命名：user>>>email>>>online（xray stats 中的在线连接计数）。
-var onlineRe = regexp.MustCompile(`^user>>>.*>>>online$`)
+// OnlineUser 单个用户的在线快照：当前活跃连接的去重源 IP 列表。
+type OnlineUser struct {
+	Email string
+	IPs   []string
+}
 
 // Collector 采集 Xray stats 并通过 HandlerService 动态同步用户。
 type Collector struct {
@@ -53,6 +56,7 @@ type Collector struct {
 	baseline     bool                                // 是否已建立基线
 	currentUsers map[string]map[string]protocol.User // inboundTag -> email -> protocol.User
 	online       int                                 // 最近一次 Collect 观测到的在线用户数
+	onlineUsers  []OnlineUser                        // 最近一次 Collect 的在线用户 IP 快照
 }
 
 // New 构造采集器（apiAddr 如 127.0.0.1:10085）。
@@ -69,6 +73,45 @@ func (c *Collector) OnlineUsers() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.online
+}
+
+// OnlineSnapshot 返回最近一次 Collect 的在线用户 IP 快照（拷贝；未采集过则 nil）。
+func (c *Collector) OnlineSnapshot() []OnlineUser {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return cloneOnlineUsers(c.onlineUsers)
+}
+
+// onlineUsersFromResp 把 GetUsersStats 回复规整为在线快照（过滤空 email/空 IP）。
+func onlineUsersFromResp(resp *statsService.GetUsersStatsResponse) []OnlineUser {
+	users := make([]OnlineUser, 0, len(resp.GetUsers()))
+	for _, u := range resp.GetUsers() {
+		if u == nil || u.GetEmail() == "" {
+			continue
+		}
+		ips := make([]string, 0, len(u.GetIps()))
+		for _, e := range u.GetIps() {
+			if e != nil && e.GetIp() != "" {
+				ips = append(ips, e.GetIp())
+			}
+		}
+		if len(ips) == 0 {
+			continue // 服务端已滤掉 Count()==0 的用户，此处防御性再滤
+		}
+		users = append(users, OnlineUser{Email: u.GetEmail(), IPs: ips})
+	}
+	return users
+}
+
+func cloneOnlineUsers(src []OnlineUser) []OnlineUser {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]OnlineUser, len(src))
+	for i, u := range src {
+		out[i] = OnlineUser{Email: u.Email, IPs: append([]string(nil), u.IPs...)}
+	}
+	return out
 }
 
 // connectLocked 建立 gRPC 连接（调用方须持有 mu）。
@@ -99,10 +142,13 @@ func (c *Collector) Close() {
 }
 
 // ResetUsers 重置内存中的用户缓存（在 Xray 重启后使用）。
+// 旧进程的连接随重启全部消失，在线快照一并清零，避免心跳沿用旧进程的残影。
 func (c *Collector) ResetUsers() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.currentUsers = make(map[string]map[string]protocol.User)
+	c.online = 0
+	c.onlineUsers = nil
 }
 
 // SyncUsers 通过 gRPC HandlerService 增量调整 Xray 中的用户。
@@ -239,14 +285,13 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 		return nil, err
 	}
 
-	// ISSUE-11：从 `user>>>email>>>online` 计数器统计在线用户数（值 > 0 视为在线）。
-	online := 0
-	for _, st := range resp.Stat {
-		if onlineRe.MatchString(st.Name) && st.Value > 0 {
-			online++
-		}
+	// 在线快照：OnlineMap（user>>><email>>>online）不在 counters 命名空间，
+	// QueryStats 永远不返回它，必须走专用 RPC GetUsersStats。
+	// 失败时沿用上次快照（瞬时抖动不该让心跳在线数闪跳为 0）；xray 进程整体
+	// 掉线时 QueryStats 会先行失败，本函数根本走不到这里。
+	if err := c.collectOnlineLocked(ctx); err != nil {
+		log.Printf("agent: 在线用户采集失败（沿用上次快照）: %v", err)
 	}
-	c.online = online
 
 	// 先建基线：首次调用只记录当前值，不产出增量（user/inbound 两个计数器族都必须
 	// 入基线，否则首个周期会把节点历史总流量误报为本周期增量）
@@ -322,4 +367,15 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 	entries = appendDelta(entries, up, down, false)
 	entries = appendDelta(entries, inUp, inDown, true)
 	return entries, nil
+}
+
+// collectOnlineLocked 通过 GetUsersStats 拉取在线用户快照（调用方须持有 mu）。
+func (c *Collector) collectOnlineLocked(ctx context.Context) error {
+	resp, err := c.client.GetUsersStats(ctx, &statsService.GetUsersStatsRequest{})
+	if err != nil {
+		return err
+	}
+	c.onlineUsers = onlineUsersFromResp(resp)
+	c.online = len(c.onlineUsers)
+	return nil
 }

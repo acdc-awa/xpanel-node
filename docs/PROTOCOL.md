@@ -52,9 +52,13 @@
 ```go
 AuthPayload        { node_id, secret }
 HeartbeatPayload   { cpu, mem, mem_total, disk, disk_total, xray_running,
-                     online_users, rx_rate, tx_rate, rx_bytes, tx_bytes,
+                     online_users, online_ips?,  // 在线用户数 + 每用户在线 IP 快照
+                     rx_rate, tx_rate, rx_bytes, tx_bytes,
                      version?,  // agent 版本（v0.1.0+；旧 agent 不上报）
                      ts }       // unix 秒
+// online_ips: OnlineUserIPs { email, ips }[] —— xray GetUsersStats 快照，
+// 仅含当前有活跃连接的用户；连接断开即移除（refcount，无宽限期）。
+// 前提：主控下发配置的 policy.levels.0.statsUserOnline = true（模板已默认开启）。
 TrafficReportPayload { entries: TrafficEntry[], period }  // period: RFC3339 周期起始
 TrafficEntry       { user_id, email?, inbound?, up_bytes, down_bytes }
 User               { uuid, email, flow?, level?, limit? }  // limit: 最大在线设备数
