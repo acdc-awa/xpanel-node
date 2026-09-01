@@ -63,11 +63,23 @@ type Client struct {
 	pendingMu sync.Mutex
 	pending   map[trafficKey]*pendingEntry // by (email, inboundTag) 维度键
 	upgrading atomic.Bool                  // 面板触发升级进行中（防并发重复触发）
+
+	// 运行时设置：主控 agent_settings 下发（仅当前会话生效，agent.yaml 为兜底）。
+	// 三循环各自持有 ticker，经 reset channel 动态重建。
+	settingsMu     sync.Mutex
+	rtReport       time.Duration
+	rtHeartbeat    time.Duration
+	reportReset    chan time.Duration
+	heartbeatReset chan time.Duration
+	collectReset   chan time.Duration
 }
 
 // Run 常驻运行：流量采集上报 + 连接/服务/重连。
 func (c *Client) Run(ctx context.Context) {
 	c.pending = make(map[trafficKey]*pendingEntry)
+	c.reportReset = make(chan time.Duration, 1)
+	c.heartbeatReset = make(chan time.Duration, 1)
+	c.collectReset = make(chan time.Duration, 1)
 	go c.collectLoop(ctx)
 	go c.reportLoop(ctx)
 
@@ -94,12 +106,15 @@ func (c *Client) Run(ctx context.Context) {
 
 // collectLoop 周期性采集 xray stats 并累积到 pending。
 func (c *Client) collectLoop(ctx context.Context) {
-	ticker := time.NewTicker(c.CollectInterval)
+	ticker := time.NewTicker(c.effectiveCollect())
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case d := <-c.collectReset:
+			ticker.Reset(d)
+			continue
 		case <-ticker.C:
 			entries, err := c.Stats.Collect(ctx)
 			if err != nil {
@@ -135,12 +150,15 @@ func (c *Client) collectLoop(ctx context.Context) {
 
 // reportLoop 周期上报 pending；失败保留（重连后补报，不丢数据）。
 func (c *Client) reportLoop(ctx context.Context) {
-	ticker := time.NewTicker(c.ReportInterval)
+	ticker := time.NewTicker(c.effectiveReport())
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case d := <-c.reportReset:
+			ticker.Reset(d)
+			continue
 		case <-ticker.C:
 			c.reportPending()
 		}
@@ -331,12 +349,15 @@ func (c *Client) sendLocked(typ, id string, payload any) error {
 }
 
 func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
-	ticker := time.NewTicker(c.Heartbeat)
+	ticker := time.NewTicker(c.effectiveHeartbeat())
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case d := <-c.heartbeatReset:
+			ticker.Reset(d)
+			continue
 		case <-ticker.C:
 			snap := c.Collector.Snapshot()
 			onlineUsers := 0
@@ -372,6 +393,92 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 			}
 		}
 	}
+}
+
+// 运行时设置的合法区间：过小会打爆 WS 与主控落库，过大失去近实时语义。
+const (
+	minSettingsInterval = 5 * time.Second
+	maxSettingsInterval = 30 * time.Minute
+)
+
+func clampInterval(d time.Duration) time.Duration {
+	if d < minSettingsInterval {
+		return minSettingsInterval
+	}
+	if d > maxSettingsInterval {
+		return maxSettingsInterval
+	}
+	return d
+}
+
+// effectiveReport 当前生效的上报周期（远程下发优先，agent.yaml 兜底）。
+func (c *Client) effectiveReport() time.Duration {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	if c.rtReport > 0 {
+		return c.rtReport
+	}
+	return c.ReportInterval
+}
+
+// effectiveHeartbeat 当前生效的心跳周期（远程下发优先，agent.yaml 兜底）。
+func (c *Client) effectiveHeartbeat() time.Duration {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	if c.rtHeartbeat > 0 {
+		return c.rtHeartbeat
+	}
+	return c.Heartbeat
+}
+
+// effectiveCollect 生效采集周期 = min(yaml 配置, 生效上报周期)，
+// 防上报快于采集造成的增量粒度倒挂。
+func (c *Client) effectiveCollect() time.Duration {
+	cd := c.CollectInterval
+	if r := c.effectiveReport(); r < cd {
+		cd = r
+	}
+	return cd
+}
+
+// applyAgentSettings 应用主控下发的运行时设置并通知三个循环重建 ticker
+// （远程设置仅当前会话生效，不写回 agent.yaml）。返回变更摘要（回执 data）。
+func (c *Client) applyAgentSettings(p protocol.AgentSettingsPayload) string {
+	c.settingsMu.Lock()
+	var changed []string
+	if p.ReportIntervalSec > 0 {
+		d := clampInterval(time.Duration(p.ReportIntervalSec) * time.Second)
+		if d != c.rtReport {
+			changed = append(changed, fmt.Sprintf("上报周期→%s", d))
+		}
+		c.rtReport = d
+	}
+	if p.HeartbeatIntervalSec > 0 {
+		d := clampInterval(time.Duration(p.HeartbeatIntervalSec) * time.Second)
+		if d != c.rtHeartbeat {
+			changed = append(changed, fmt.Sprintf("心跳周期→%s", d))
+		}
+		c.rtHeartbeat = d
+	}
+	c.settingsMu.Unlock()
+	if len(changed) == 0 {
+		return "设置无变更"
+	}
+	log.Printf("agent: 应用主控运行时设置: %s", strings.Join(changed, "，"))
+	// 非阻塞通知对应循环重建 ticker（缓冲 1；循环忙时丢弃，下次下发兜底）
+	select {
+	case c.reportReset <- c.effectiveReport():
+	default:
+	}
+	select {
+	case c.collectReset <- c.effectiveCollect():
+	default:
+	}
+	select {
+	case c.heartbeatReset <- c.effectiveHeartbeat():
+	default:
+	}
+	return strings.Join(changed, "，")
 }
 
 // handle 处理主控指令并回执。
@@ -444,6 +551,12 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		return c.handlePushCert(m)
 	case protocol.MsgUpgradeAgent:
 		return c.handleUpgradeAgent(m)
+	case protocol.MsgAgentSettings:
+		var p protocol.AgentSettingsPayload
+		if err := m.PayloadTo(&p); err != nil {
+			return &protocol.ResultPayload{OK: false, Error: "解析 agent_settings 失败: " + err.Error()}
+		}
+		return &protocol.ResultPayload{OK: true, Data: c.applyAgentSettings(p)}
 	default:
 		return nil
 	}

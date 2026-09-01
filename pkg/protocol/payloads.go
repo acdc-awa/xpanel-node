@@ -105,6 +105,13 @@ type UpgradeAgentPayload struct {
 	Target string `json:"target,omitempty"`
 }
 
+// AgentSettingsPayload 主控→节点：运行时设置（连接建立与设置保存时下发，仅当前会话生效，
+// 不写回 agent.yaml；字段为 0 表示保持现状）。agent.yaml 仍是主控未下发时的兜底。
+type AgentSettingsPayload struct {
+	ReportIntervalSec    int `json:"report_interval_sec,omitempty"`    // 流量上报周期（秒）
+	HeartbeatIntervalSec int `json:"heartbeat_interval_sec,omitempty"` // 状态心跳周期（秒）
+}
+
 // ResultPayload 指令回执（id 回填请求 ID）。
 type ResultPayload struct {
 	OK    bool   `json:"ok"`

@@ -13,6 +13,8 @@ xray:
   pid_file: /run/xray-agent/xray.pid
 
 # 流量采集：对应 xray 配置的 api 段（agent 通过 gRPC 查询 stats）
+# 周期也可由主控「设置 → 节点上报」远程下发（仅当前会话生效，agent.yaml 为兜底）；
+# 远程生效采集周期 = min(collect_interval, 生效上报周期)。
 stats:
   api_addr: 127.0.0.1:10085
   collect_interval: 30s

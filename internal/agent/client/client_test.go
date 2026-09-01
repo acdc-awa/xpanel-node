@@ -173,3 +173,57 @@ func TestDispatchUnknownType(t *testing.T) {
 		t.Errorf("未知类型应返回 nil: %+v", res)
 	}
 }
+
+// TestApplyAgentSettings 主控下发的运行时设置：clamp 到 5s–30min、远程值覆盖 yaml 兜底、
+// 采集周期跟随（min(yaml, report)）防上报快于采集的粒度倒挂。
+func TestApplyAgentSettings(t *testing.T) {
+	c := setupClient(t)
+	c.ReportInterval = 60 * time.Second
+	c.Heartbeat = 30 * time.Second
+	c.CollectInterval = 30 * time.Second
+	c.reportReset = make(chan time.Duration, 1)
+	c.heartbeatReset = make(chan time.Duration, 1)
+	c.collectReset = make(chan time.Duration, 1)
+
+	// 未下发时走 yaml 兜底
+	if got := c.effectiveReport(); got != 60*time.Second {
+		t.Fatalf("未下发时 effectiveReport = %s, want 60s", got)
+	}
+
+	// 正常下发：report 15s → 生效 15s，采集跟随 min(30s, 15s)=15s；心跳不变
+	if res := c.dispatch(mustMsg(t, protocol.MsgAgentSettings, protocol.AgentSettingsPayload{ReportIntervalSec: 15})); res == nil || !res.OK {
+		t.Fatalf("agent_settings 应成功: %+v", res)
+	}
+	if got := c.effectiveReport(); got != 15*time.Second {
+		t.Fatalf("effectiveReport = %s, want 15s", got)
+	}
+	if got := c.effectiveCollect(); got != 15*time.Second {
+		t.Fatalf("effectiveCollect = %s, want 15s（跟随上报）", got)
+	}
+	if got := c.effectiveHeartbeat(); got != 30*time.Second {
+		t.Fatalf("effectiveHeartbeat = %s, want 30s（未下发不变）", got)
+	}
+
+	// clamp：过小 → 5s；过大 → 30min
+	c.dispatch(mustMsg(t, protocol.MsgAgentSettings, protocol.AgentSettingsPayload{HeartbeatIntervalSec: 1}))
+	if got := c.effectiveHeartbeat(); got != minSettingsInterval {
+		t.Fatalf("过小心跳应 clamp 到 5s, got %s", got)
+	}
+	c.dispatch(mustMsg(t, protocol.MsgAgentSettings, protocol.AgentSettingsPayload{ReportIntervalSec: 999999}))
+	if got := c.effectiveReport(); got != maxSettingsInterval {
+		t.Fatalf("过大上报应 clamp 到 30min, got %s", got)
+	}
+
+	// 采集周期只跟随缩短不放大：yaml 30s < report 30min → 采集仍 30s
+	if got := c.effectiveCollect(); got != 30*time.Second {
+		t.Fatalf("effectiveCollect = %s, want 30s（min(yaml, report)）", got)
+	}
+
+	// 全 0 payload：保持现状（回执仍 OK）
+	if res := c.dispatch(mustMsg(t, protocol.MsgAgentSettings, protocol.AgentSettingsPayload{})); res == nil || !res.OK {
+		t.Fatalf("全 0 设置应成功无变更: %+v", res)
+	}
+	if got := c.effectiveReport(); got != maxSettingsInterval {
+		t.Fatalf("全 0 设置不得改动现值, got %s", got)
+	}
+}

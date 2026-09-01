@@ -47,6 +47,7 @@
 | `rotate_internal_account` | SetupInternalAccountPayload | 重新生成内部 UUID |
 | `push_cert` | PushCertPayload | TLS 证书下发（agent 校验 PEM 匹配后落盘） |
 | `upgrade_agent` | UpgradeAgentPayload | 触发 agent 自升级到最新 release（见 §5 时序），回 `result`（data 为升级结果文本） |
+| `agent_settings` | AgentSettingsPayload | 下发运行时设置（连接建立与设置保存时；0=不变），回 `result`（data 为变更摘要） |
 
 ## 4. 载荷结构
 
@@ -71,6 +72,8 @@ SetupInternalResult         { tag, uuid }          // uuid 由节点生成，主
 PushCertPayload    { domain, cert_pem, key_pem }
 InternalUUIDReportPayload { tag, uuid }
 UpgradeAgentPayload { target? }              // 空 = 拉取最新 release
+AgentSettingsPayload { report_interval_sec?, heartbeat_interval_sec? }
+                    // 秒；0=不变；clamp 5s–30min；仅当前会话生效（不写回 agent.yaml）
 ResultPayload      { ok, error?, data? }
 StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at? }
 ```
@@ -83,6 +86,9 @@ StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at? 
 - **用户热更新**：`sync_users` → gRPC AlterInbound 增删用户（不重启 xray）→ `result` 回执。
 - **自升级**：`upgrade_agent` → 节点先同步查最新版本（快路径，已是最新/查询失败立即回执）→ 后台从 GitHub Releases 下载二进制 + checksums.txt（sha256 强制校验）→ 原子替换自身 → **先发 `result` 回执再重启**（systemd 服务内 `systemctl restart` 会终止本进程，若等重启完成再回执则回执永远发不出去）。主控侧等待回执超时应远大于常规指令（面板用 5 分钟）。
 - **断线重连**：节点指数退避重连（上限默认 60s）；主控侧离线期间的配置变更在重连后自动补推。
+- **运行时设置**：主控在节点连接建立与设置保存时下发 `agent_settings`，节点动态重建采集/上报/心跳 ticker
+  （生效采集周期 = min(agent.yaml, 生效上报周期)，防上报快于采集的粒度倒挂）。未收到下发时按 agent.yaml 兜底；
+  不支持该指令的旧 agent 静默忽略（不回应，主控侧回执超时忽略即可）。
 
 ## 6. 版本兼容
 
