@@ -152,9 +152,15 @@ fi
 # ---------- 2. 安装 xray-core ----------
 run mkdir_p /usr/local/share/xray
 if [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 2>&1; then
+  case "$ARCH" in
+    amd64) XRAY_ARCH="64" ;;
+    arm64) XRAY_ARCH="arm64-v8a" ;;
+    *) echo "不支持的 Xray 架构: $ARCH"; exit 1 ;;
+  esac
   ZIP="/tmp/xray-${XRAY_VERSION}.zip"
-  URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
-  echo "==> 下载 xray ${XRAY_VERSION}"
+  XRAY_FILE="Xray-linux-${XRAY_ARCH}.zip"
+  URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${XRAY_FILE}"
+  echo "==> 下载 xray ${XRAY_VERSION} (${XRAY_FILE})"
   run curl -fL -o "$ZIP" "$URL"
   echo "==> 下载校验和"
   run curl -fL -o "${ZIP}.dgst" "${URL}.dgst"
@@ -167,10 +173,10 @@ if [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 2>
   fi
   EXPECT="$(grep -iE 'sha(2-)?256' "${ZIP}.dgst" | grep -oE '[0-9a-f]{64}' | head -1)"
   if [[ -z "$EXPECT" ]]; then
-    EXPECT="$(grep -E 'Xray-linux-64.zip' "${ZIP}.dgst" | grep -oE '[0-9a-f]{64}' | head -1)"
+    EXPECT="$(grep -E "${XRAY_FILE}" "${ZIP}.dgst" | grep -oE '[0-9a-f]{64}' | head -1)"
   fi
   if [[ -z "$EXPECT" ]]; then
-    echo "校验和文件无法解析 sha256（需 SHA2-256 或 Xray-linux-64.zip 条目）（拒绝安装）"; exit 1
+    echo "校验和文件无法解析 sha256（需 SHA2-256 或 ${XRAY_FILE} 条目）（拒绝安装）"; exit 1
   fi
   ACTUAL=$(sha256sum "$ZIP" | awk '{print $1}')
   if [[ "$EXPECT" != "$ACTUAL" ]]; then

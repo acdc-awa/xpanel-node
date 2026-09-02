@@ -562,10 +562,9 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 	}
 }
 
-// handleUpgradeAgent 面板触发的自升级：同步做版本检查（快速失败、立即回执），
-// 下载/替换放后台 goroutine（从 GitHub 拉二进制可达数分钟，不能阻塞读循环导致
-// 心跳/pong 停摆被主控回收）。成功路径在回执发出后触发重启——systemctl restart
-// 会终止本进程，若等重启完成再回执则回执永远发不出去。
+// handleUpgradeAgent 面板触发的自升级：版本检查与下载/替换全部移入后台 goroutine
+// 执行（外部网络请求可达数十秒至数分钟，绝不能阻塞 WebSocket 读循环导致心跳/pong
+// 停摆被主控回收）。成功路径在回执刷出后延时触发重启。
 func (c *Client) handleUpgradeAgent(m *protocol.Message) *protocol.ResultPayload {
 	if c.Upgrade == nil {
 		return &protocol.ResultPayload{OK: false, Error: "节点未配置升级源（update.repo/mirror）"}
@@ -575,24 +574,11 @@ func (c *Client) handleUpgradeAgent(m *protocol.Message) *protocol.ResultPayload
 	if !c.upgrading.CompareAndSwap(false, true) {
 		return &protocol.ResultPayload{OK: false, Error: "升级正在进行中，请稍候"}
 	}
-	target := p.Target
-	if target == "" {
-		latest, err := c.Upgrade.Latest()
-		if err != nil {
-			c.upgrading.Store(false)
-			return &protocol.ResultPayload{OK: false, Error: "查询最新版本失败: " + err.Error()}
-		}
-		target = latest
-	}
-	if upgrade.Compare(upgrade.CurrentVersion(), target) >= 0 {
-		c.upgrading.Store(false)
-		return &protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已是最新版本 %s（远端 %s）", upgrade.CurrentVersion(), target)}
-	}
-	go c.runUpgrade(m.ID, target)
-	return nil // 回执由 runUpgrade 在下载/替换完成后发送
+	go c.runUpgrade(m.ID, p.Target)
+	return nil // 回执由 runUpgrade 在版本检查/下载/替换完成后发送
 }
 
-// runUpgrade 后台执行下载 → sha256 校验 → 原子替换，随后先发回执再触发重启。
+// runUpgrade 后台执行查询 → 下载 → sha256 校验 → 原子替换，随后先发回执再延时触发重启。
 func (c *Client) runUpgrade(reqID, target string) {
 	defer c.upgrading.Store(false)
 	from := upgrade.CurrentVersion()
@@ -600,6 +586,19 @@ func (c *Client) runUpgrade(reqID, target string) {
 		if err := c.send(protocol.MsgResult, reqID, res); err != nil {
 			log.Printf("agent: upgrade_agent 回执发送失败: %v", err)
 		}
+	}
+
+	if target == "" {
+		latest, err := c.Upgrade.Latest()
+		if err != nil {
+			reply(protocol.ResultPayload{OK: false, Error: "查询最新版本失败: " + err.Error()})
+			return
+		}
+		target = latest
+	}
+	if upgrade.Compare(from, target) >= 0 {
+		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已是最新版本 %s（远端 %s）", from, target)})
+		return
 	}
 
 	exe, err := os.Executable()
@@ -627,9 +626,20 @@ func (c *Client) runUpgrade(reqID, target string) {
 		return
 	}
 	reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s，节点正在重启", from, target)})
-	// 回执已写出，此刻才允许重启杀掉自己；失败仅记录（新二进制已就位，旧进程继续跑）
+	// 回执已写出：延时 1 秒确保 TCP 缓冲区将回执刷至主控，再触发 systemctl restart 杀掉自己
+	time.Sleep(1 * time.Second)
 	if err := c.SelfRestart(); err != nil {
 		log.Printf("agent: 自重启失败（新二进制已就位，可手动 systemctl restart xray-agent）: %v", err)
+	}
+}
+
+// TriggerReconnect 主动断开当前长连接以触发指数退避外的立即重连（如 Xray 重启后向主控重新对齐用户）。
+func (c *Client) TriggerReconnect() {
+	c.writeMu.Lock()
+	ws := c.ws
+	c.writeMu.Unlock()
+	if ws != nil {
+		_ = ws.Close()
 	}
 }
 

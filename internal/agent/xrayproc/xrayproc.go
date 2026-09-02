@@ -33,6 +33,7 @@ type Proc struct {
 	cmd       *exec.Cmd
 	started   bool // 是否曾启动（用于看门狗判定"崩溃后拉起"）
 	startedAt time.Time
+	OnRestart func() // 崩溃后被 Watchdog 成功拉起时的回调
 }
 
 // New 构造托管器。
@@ -133,13 +134,13 @@ func (p *Proc) Start() error {
 	if err != nil {
 		return err
 	}
+	defer logFile.Close()
 
 	cmd := exec.Command(p.Bin, "run", "-c", p.ConfigPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	setSysProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
 		return fmt.Errorf("启动 xray 失败: %w", err)
 	}
 	// 异步 Wait 回收子进程，避免僵尸（僵尸会导致 kill(pid,0) 误判存活）
@@ -276,6 +277,12 @@ func (p *Proc) Watchdog(stop <-chan struct{}) {
 				if err := p.Start(); err != nil {
 					// 崩溃后拉起失败：等下一个周期重试
 					continue
+				}
+				p.mu.Lock()
+				onRestart := p.OnRestart
+				p.mu.Unlock()
+				if onRestart != nil {
+					go onRestart()
 				}
 			}
 		}

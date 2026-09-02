@@ -342,7 +342,11 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 	entries := make([]Entry, 0, len(up)+len(inUp))
 	appendDelta := func(dst []Entry, upMap, downMap map[string]int64, inbound bool) []Entry {
 		for key, u := range upMap {
-			e := Entry{Up: u, Down: downMap[key]}
+			d := downMap[key]
+			if u == 0 && d == 0 {
+				continue // 过滤无流量增量条目，避免海量全 0 条目挤占网络带宽与序列化开销
+			}
+			e := Entry{Up: u, Down: d}
 			if inbound {
 				e.Inbound = key
 			} else {
@@ -350,9 +354,9 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 			}
 			dst = append(dst, e)
 		}
-		// 仅上报有流量的（down 单独有流量而 up 为 0 的情况）
+		// 仅上报有流量的（down 单独有流量而 upMap 中无该 key 的情况）
 		for key, d := range downMap {
-			if upMap[key] == 0 && d > 0 {
+			if _, ok := upMap[key]; !ok && d > 0 {
 				e := Entry{Up: 0, Down: d}
 				if inbound {
 					e.Inbound = key

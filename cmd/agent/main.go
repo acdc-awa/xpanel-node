@@ -125,6 +125,14 @@ func main() {
 		SelfRestart:     selfRestart,
 	}
 
+	// Watchdog 崩溃自愈回调：Xray 崩溃拉起后清空内存中的用户列表并触发向主控重连，
+	// 主控重连握手成功后会自动全量下发 sync_users 补齐全部用户（防静态配置用户丢失）。
+	proc.OnRestart = func() {
+		log.Println("xray-agent: 检测到 xray 异常拉起，重置内存用户列表并触发重连向主控同步")
+		statsCollector.ResetUsers()
+		cli.TriggerReconnect()
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
