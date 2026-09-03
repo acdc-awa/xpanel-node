@@ -121,7 +121,7 @@ func main() {
 		ReportInterval:  cfg.Stats.ReportInterval,
 		Accounts:        accounts.New(cfg.AccountsPath),
 		CertsDir:        cfg.CertsDir,
-		Upgrade:         &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror},
+		Upgrade:         &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror, DownloadTimeout: cfg.Update.DownloadTimeout},
 		SelfRestart:     selfRestart,
 	}
 

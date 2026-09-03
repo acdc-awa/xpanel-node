@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCompare(t *testing.T) {
@@ -75,7 +76,8 @@ func newFakeGitHub(t *testing.T, fr fakeRelease) (*httptest.Server, *Fetcher) {
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return srv, &Fetcher{Repo: repo, Mirror: srv.URL}
+	// 候选列表封闭为本服务，避免 fallback 链打到真实 github.com
+	return srv, &Fetcher{Repo: repo, Mirrors: []string{srv.URL}}
 }
 
 func TestFetcherLatest(t *testing.T) {
@@ -91,7 +93,7 @@ func TestFetcherLatestNoRedirect(t *testing.T) {
 		w.Write([]byte("ok")) // 200 且无 Location
 	}))
 	defer srv.Close()
-	f := &Fetcher{Repo: "o/r", Mirror: srv.URL}
+	f := &Fetcher{Repo: "o/r", Mirrors: []string{srv.URL}} // 候选封闭，避免 fallback 到真实 github.com
 	if _, err := f.Latest(); err == nil {
 		t.Error("无重定向应报错")
 	}
@@ -129,5 +131,106 @@ func TestSha256Hex(t *testing.T) {
 	sum := Sha256Hex([]byte("abc"))
 	if !strings.HasPrefix(sum, "ba7816bf") {
 		t.Errorf("sha256(abc) = %s", sum)
+	}
+}
+
+func TestFetcherCandidates(t *testing.T) {
+	cases := []struct {
+		name    string
+		mirror  string
+		mirrors []string
+		want    []string
+	}{
+		{"默认内置列表", "", nil, builtinMirrors},
+		{"配置镜像置顶", "https://m.example.com", nil, append([]string{"https://m.example.com"}, builtinMirrors...)},
+		{"配置镜像与内置重复去重", "https://github.com", nil, builtinMirrors},
+		{"显式列表覆盖一切", "https://x.example.com", []string{"https://a/", "https://a", ""}, []string{"https://a"}},
+	}
+	for _, c := range cases {
+		f := &Fetcher{Mirror: c.mirror, Mirrors: c.mirrors}
+		got := f.candidates()
+		if len(got) != len(c.want) {
+			t.Errorf("%s: candidates = %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: candidates[%d] = %q, want %q", c.name, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+// deadServer 起一个随即关闭的服务，作为链首坏镜像（连接拒绝，快速失败）。
+func deadServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+	return url
+}
+
+func TestFetcherLatestFallsBack(t *testing.T) {
+	_, good := newFakeGitHub(t, fakeRelease{Tag: "v1.2.3"})
+	f := &Fetcher{Repo: good.Repo, Mirrors: []string{deadServer(t), good.Mirrors[0]}}
+	v, err := f.Latest()
+	if err != nil || v != "v1.2.3" {
+		t.Fatalf("Latest = %q, %v（坏镜像后应切到好镜像）", v, err)
+	}
+}
+
+func TestFetcherLatestAllFail(t *testing.T) {
+	_, good := newFakeGitHub(t, fakeRelease{Tag: "v1.2.3"})
+	f := &Fetcher{Repo: good.Repo, Mirrors: []string{deadServer(t), deadServer(t)}}
+	if _, err := f.Latest(); err == nil || !strings.Contains(err.Error(), "所有下载源") {
+		t.Fatalf("err = %v, want 全部失败聚合错误", err)
+	}
+}
+
+func TestFetcherDownloadFallsBack(t *testing.T) {
+	_, good := newFakeGitHub(t, fakeRelease{Tag: "v1.2.3", Data: []byte("agent-binary")})
+	// 链首坏镜像连接拒绝；资产与 checksums.txt 均从好镜像取齐
+	f := &Fetcher{Repo: good.Repo, Mirrors: []string{deadServer(t), good.Mirrors[0]}}
+	data, sum, err := f.Download("v1.2.3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "agent-binary" || sum != Sha256Hex(data) {
+		t.Errorf("data/sum 不正确: %q %q", data, sum)
+	}
+}
+
+func TestFetcherDownloadBadChecksumsNoFallback(t *testing.T) {
+	// 链首 release 损坏（checksums 缺条目）：换镜像无意义，应立即报错而非耗尽候选链
+	_, broken := newFakeGitHub(t, fakeRelease{Tag: "v1.2.3", Data: []byte("x"), Sums: "abc  other-asset\n"})
+	_, good := newFakeGitHub(t, fakeRelease{Tag: "v1.2.3", Data: []byte("x")})
+	f := &Fetcher{Repo: broken.Repo, Mirrors: []string{broken.Mirrors[0], good.Mirrors[0]}}
+	_, _, err := f.Download("v1.2.3")
+	if err == nil || !strings.Contains(err.Error(), "缺少") {
+		t.Fatalf("err = %v, want 缺条目错误", err)
+	}
+	if strings.Contains(err.Error(), "所有下载源") {
+		t.Errorf("release 损坏不应继续耗尽候选链: %v", err)
+	}
+}
+
+func TestFetcherDownloadTimeout(t *testing.T) {
+	_, good := newFakeGitHub(t, fakeRelease{Tag: "v1.2.3"})
+	// 默认值
+	f := &Fetcher{Repo: good.Repo, Mirrors: good.Mirrors}
+	_, dl := f.clients()
+	if dl.Timeout != defaultDownloadTimeout {
+		t.Errorf("默认下载超时 = %v, want %v", dl.Timeout, defaultDownloadTimeout)
+	}
+	// 显式配置
+	f = &Fetcher{Repo: good.Repo, Mirrors: good.Mirrors, DownloadTimeout: 2 * time.Minute}
+	_, dl = f.clients()
+	if dl.Timeout != 2*time.Minute {
+		t.Errorf("配置下载超时 = %v, want 2m", dl.Timeout)
+	}
+	// 轻请求 client 不跟随重定向
+	q, _ := f.clients()
+	if q.CheckRedirect == nil {
+		t.Error("query client 应设置 CheckRedirect（不跟随重定向）")
 	}
 }

@@ -27,7 +27,7 @@ xray-agent upgrade           # 检查 GitHub 最新 release，校验 sha256 后�
 xray-agent upgrade --check   # 仅检查版本
 ```
 
-下载源默认 `acdc-awa/XPanel-Node` Releases，可在 `config.yml` 的 `update.repo` / `update.mirror` 覆盖（见 `agent.example.yaml`）。
+下载源默认 `acdc-awa/XPanel-Node` Releases，可在 `config.yml` 的 `update.repo` / `update.mirror` / `update.download_timeout` 覆盖（见 `agent.example.yaml`）。升级按镜像候选链逐个尝试：`update.mirror` 置顶，其后自动落回内置候选（github.com → ghproxy.net → gh-proxy.com → moeyy），单个下载源超时/HTTP 失败自动切换下一个；单镜像下载超时默认 10m，慢链路可调大。
 
 ## 其他子命令
 

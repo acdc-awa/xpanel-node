@@ -20,10 +20,12 @@ stats:
   collect_interval: 30s
   report_interval: 60s
 
-# 自升级下载源（xray-agent upgrade；默认 GitHub acdc-awa/XPanel-Node Releases，均可不填）
+# 自升级下载源（xray-agent upgrade 与面板触发升级共用；默认 GitHub acdc-awa/XPanel-Node Releases，均可不填）
+# 镜像候选链：mirror 置顶尝试，失败自动切换内置候选（github.com → ghproxy.net → gh-proxy.com → moeyy）
 update:
   # repo: acdc-awa/XPanel-Node   # owner/repo
-  # mirror: ""                    # github.com 替代基址/代理前缀，如 https://ghproxy.net/https://github.com
+  # mirror: https://ghproxy.net/https://github.com   # 首选镜像/代理前缀（GitHub 直连不稳时配置）
+  # download_timeout: 10m        # 单镜像单次资产下载超时（慢链路可调大，0 = 默认 10m）
 
 heartbeat_interval: 30s
 reconnect_max: 60s

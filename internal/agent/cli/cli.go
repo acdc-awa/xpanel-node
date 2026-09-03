@@ -435,7 +435,7 @@ func runUpgrade(rest []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	f := &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror}
+	f := &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror, DownloadTimeout: cfg.Update.DownloadTimeout}
 	if *checkOnly {
 		latest, err := f.Latest()
 		if err != nil {

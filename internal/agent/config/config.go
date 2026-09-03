@@ -45,7 +45,9 @@ type Stats struct {
 // Update 自升级下载源（默认 GitHub: acdc-awa/XPanel-Node Releases）。
 type Update struct {
 	Repo   string `yaml:"repo"`   // owner/repo，空 = 内置默认
-	Mirror string `yaml:"mirror"` // github.com 的替代基址/代理前缀（可选，如 https://ghproxy.net/https://github.com）
+	Mirror string `yaml:"mirror"` // 首选镜像/代理前缀，置顶尝试；失败自动切换内置候选列表
+	// DownloadTimeout 单镜像单次资产下载超时，0 = 默认 10m（慢链路可调大）。
+	DownloadTimeout time.Duration `yaml:"download_timeout"`
 }
 
 // Default 返回内置默认值。
