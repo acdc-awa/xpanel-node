@@ -582,49 +582,81 @@ func (c *Client) handleUpgradeAgent(m *protocol.Message) *protocol.ResultPayload
 func (c *Client) runUpgrade(reqID, target string) {
 	defer c.upgrading.Store(false)
 	from := upgrade.CurrentVersion()
+
+	report := func(phase, msg, errStr string) {
+		p := protocol.UpgradeProgressPayload{
+			Phase:   phase,
+			Target:  target,
+			Message: msg,
+			Error:   errStr,
+			TS:      time.Now().Unix(),
+		}
+		_ = c.send(protocol.MsgUpgradeProgress, "", p)
+	}
+
 	reply := func(res protocol.ResultPayload) {
 		if err := c.send(protocol.MsgResult, reqID, res); err != nil {
 			log.Printf("agent: upgrade_agent 回执发送失败: %v", err)
 		}
 	}
 
+	report("checking", "正在查询最新版本...", "")
 	if target == "" {
 		latest, err := c.Upgrade.Latest()
 		if err != nil {
-			reply(protocol.ResultPayload{OK: false, Error: "查询最新版本失败: " + err.Error()})
+			errText := "查询最新版本失败: " + err.Error()
+			report("failed", "查询最新版本失败", errText)
+			reply(protocol.ResultPayload{OK: false, Error: errText})
 			return
 		}
 		target = latest
 	}
 	if upgrade.Compare(from, target) >= 0 {
+		report("success", fmt.Sprintf("已是最新版本 %s（远端 %s），无需升级", from, target), "")
 		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已是最新版本 %s（远端 %s）", from, target)})
 		return
 	}
 
 	exe, err := os.Executable()
 	if err != nil {
-		reply(protocol.ResultPayload{OK: false, Error: "获取自身路径失败: " + err.Error()})
+		errText := "获取自身路径失败: " + err.Error()
+		report("failed", "获取自身路径失败", errText)
+		reply(protocol.ResultPayload{OK: false, Error: errText})
 		return
 	}
+
+	report("downloading", fmt.Sprintf("正在从 GitHub 下载版本 %s 二进制与校验和...", target), "")
 	data, wantSum, err := c.Upgrade.Download(target)
 	if err != nil {
+		report("failed", "下载安装包失败", err.Error())
 		reply(protocol.ResultPayload{OK: false, Error: err.Error()})
 		return
 	}
+
+	report("verifying", "正在校验 sha256 完整性...", "")
 	if !strings.EqualFold(wantSum, upgrade.Sha256Hex(data)) {
-		reply(protocol.ResultPayload{OK: false, Error: fmt.Sprintf("sha256 校验失败: 声明 %s 实际 %s", wantSum, upgrade.Sha256Hex(data))})
+		errText := fmt.Sprintf("sha256 校验失败: 声明 %s 实际 %s", wantSum, upgrade.Sha256Hex(data))
+		report("failed", "校验失败", errText)
+		reply(protocol.ResultPayload{OK: false, Error: errText})
 		return
 	}
+
+	report("replacing", "正在替换二进制文件...", "")
 	if err := upgrade.ReplaceBinary(exe, data); err != nil {
-		reply(protocol.ResultPayload{OK: false, Error: "替换二进制失败: " + err.Error()})
+		errText := "替换二进制失败: " + err.Error()
+		report("failed", "替换失败", errText)
+		reply(protocol.ResultPayload{OK: false, Error: errText})
 		return
 	}
 	log.Printf("agent: 二进制已升级 %s → %s（%s）", from, target, exe)
 
 	if c.SelfRestart == nil {
+		report("success", fmt.Sprintf("已升级 %s → %s（手动模式，请手动重启 agent）", from, target), "")
 		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s；当前为手动运行模式，请手动重启 agent 进程加载新版本", from, target)})
 		return
 	}
+
+	report("restarting", fmt.Sprintf("已升级 %s → %s，正在重启服务...", from, target), "")
 	reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s，节点正在重启", from, target)})
 	// 回执已写出：延时 1 秒确保 TCP 缓冲区将回执刷至主控，再触发 systemctl restart 杀掉自己
 	time.Sleep(1 * time.Second)

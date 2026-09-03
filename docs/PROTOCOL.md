@@ -33,6 +33,7 @@
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s） |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
 | `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更主动上报（如 CLI 轮换） |
+| `upgrade_progress` | UpgradeProgressPayload | agent 升级进度状态上报（阶段流式通知，2026-09-03 新增） |
 
 ### 主控 → 节点
 
@@ -72,6 +73,8 @@ SetupInternalResult         { tag, uuid }          // uuid 由节点生成，主
 PushCertPayload    { domain, cert_pem, key_pem }
 InternalUUIDReportPayload { tag, uuid }
 UpgradeAgentPayload { target? }              // 空 = 拉取最新 release
+UpgradeProgressPayload { phase, target?, message, error?, ts }
+                     // phase: starting/checking/downloading/verifying/replacing/restarting/failed/success
 AgentSettingsPayload { report_interval_sec?, heartbeat_interval_sec? }
                     // 秒；0=不变；clamp 5s–30min；仅当前会话生效（不写回 agent.yaml）
 ResultPayload      { ok, error?, data? }
@@ -84,7 +87,7 @@ StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at? 
 - **流量上报**：默认 60s 一次，主控落 `traffic_logs` 并按周期聚合。
 - **配置下发**：`push_config` → 节点 `xray -test` 校验 → 落盘 → 重启 xray → `result` 回执（失败自动回滚旧配置）。
 - **用户热更新**：`sync_users` → gRPC AlterInbound 增删用户（不重启 xray）→ `result` 回执。
-- **自升级**：`upgrade_agent` → 节点先同步查最新版本（快路径，已是最新/查询失败立即回执）→ 后台从 GitHub Releases 下载二进制 + checksums.txt（sha256 强制校验）→ 原子替换自身 → **先发 `result` 回执再重启**（systemd 服务内 `systemctl restart` 会终止本进程，若等重启完成再回执则回执永远发不出去）。主控侧等待回执超时应远大于常规指令（面板用 5 分钟）。
+- **自升级**：`upgrade_agent` → 节点后台执行自升级，并在各阶段主动上报 `upgrade_progress`（checking → downloading → verifying → replacing → restarting / failed / success），主控实时缓存并暴露给面板步骤条展示；替换完成后**先发 `result` 回执再重启**（systemd 服务内 `systemctl restart` 会终止本进程，若等重启完成再回执则回执永远发不出去）。主控侧等待回执超时用 5 分钟长超时。
 - **断线重连**：节点指数退避重连（上限默认 60s）；主控侧离线期间的配置变更在重连后自动补推。
 - **运行时设置**：主控在节点连接建立与设置保存时下发 `agent_settings`，节点动态重建采集/上报/心跳 ticker
   （生效采集周期 = min(agent.yaml, 生效上报周期)，防上报快于采集的粒度倒挂）。未收到下发时按 agent.yaml 兜底；

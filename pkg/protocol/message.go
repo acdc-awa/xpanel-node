@@ -31,8 +31,9 @@ const (
 	MsgInternalUUIDReport    = "internal_uuid_report"    // 节点→主控：内部 UUID 变更主动上报
 
 	// 运维指令
-	MsgUpgradeAgent  = "upgrade_agent"  // 主控→节点：升级 agent 二进制（自升级，见 internal/agent/upgrade）
-	MsgAgentSettings = "agent_settings" // 主控→节点：下发上报/心跳等运行时设置（0=保持不变）
+	MsgUpgradeAgent    = "upgrade_agent"    // 主控→节点：升级 agent 二进制（自升级，见 internal/agent/upgrade）
+	MsgUpgradeProgress = "upgrade_progress" // 节点→主控：agent 升级进度状态上报
+	MsgAgentSettings   = "agent_settings"   // 主控→节点：下发上报/心跳等运行时设置（0=保持不变）
 
 	// 认证握手结果（主控→节点，首条 auth 消息的应答帧类型）
 	MsgAuthOK  = "auth_ok"

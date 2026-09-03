@@ -105,6 +105,15 @@ type UpgradeAgentPayload struct {
 	Target string `json:"target,omitempty"`
 }
 
+// UpgradeProgressPayload 节点→主控：升级进度上报。
+type UpgradeProgressPayload struct {
+	Phase   string `json:"phase"`   // starting | checking | downloading | verifying | replacing | restarting | failed | success
+	Target  string `json:"target,omitempty"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
+	TS      int64  `json:"ts"`
+}
+
 // AgentSettingsPayload 主控→节点：运行时设置（连接建立与设置保存时下发，仅当前会话生效，
 // 不写回 agent.yaml；字段为 0 表示保持现状）。agent.yaml 仍是主控未下发时的兜底。
 type AgentSettingsPayload struct {
