@@ -17,6 +17,7 @@
 #   --xray-version <v>   xray 版本（默认 v26.6.27，与验证环境一致）
 #   --xray-file <path>   本地 xray 压缩包（Xray-linux-*.zip，完全离线安装场景）
 #   --xray-digest <sha>  期望的 xray 压缩包 sha256（提供则强制校验）
+#   --force-config       重置 /etc/xray-agent/config.yml（默认已存在则保留；重置前自动备份 .bak）
 #   --dry-run            只打印将执行的步骤，不实际执行
 #
 # 说明：agent 二进制默认从 GitHub Releases 下载并自动用 release 的 checksums.txt
@@ -36,12 +37,13 @@ AGENT_DIGEST=""
 XRAY_VERSION="v26.6.27"
 XRAY_FILE_LOCAL=""
 XRAY_DIGEST=""
+FORCE_CONFIG=0
 DRY_RUN=0
 
 GH_REPO="acdc-awa/XPanel-Node"
 
 usage() {
-  sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
     --xray-version) XRAY_VERSION="$2"; shift 2;;
     --xray-file) XRAY_FILE_LOCAL="$2"; shift 2;;
     --xray-digest) XRAY_DIGEST="$2"; shift 2;;
+    --force-config) FORCE_CONFIG=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) usage;;
     *) echo "未知参数: $1"; usage;;
@@ -281,7 +284,18 @@ fi
 # ---------- 3. 写 Agent 配置 ----------
 mkdir_p /etc/xray-agent /var/log/xray-agent /run/xray-agent
 echo "==> 写入 /etc/xray-agent/config.yml"
-if [[ $DRY_RUN -eq 0 ]]; then
+if [[ $DRY_RUN -eq 1 ]]; then
+  : # dry-run 不落盘
+elif [[ -f /etc/xray-agent/config.yml && $FORCE_CONFIG -eq 0 ]]; then
+  # 幂等升级语义（与主控 install.sh 对齐）：二进制/单元文件可覆盖，配置保留——
+  # node_id/secret/update.mirror 等手工与既有值不因重跑被静默抹掉
+  echo "    /etc/xray-agent/config.yml 已存在，保留现有配置（如需重置请加 --force-config）"
+else
+  if [[ -f /etc/xray-agent/config.yml ]]; then
+    cp /etc/xray-agent/config.yml /etc/xray-agent/config.yml.bak
+    chmod 0600 /etc/xray-agent/config.yml.bak  # 备份同样含节点密钥
+    echo "    --force-config：旧配置已备份为 config.yml.bak"
+  fi
   cat > /etc/xray-agent/config.yml <<EOF
 master:
   url: ${MASTER}
@@ -296,6 +310,10 @@ stats:
   api_addr: 127.0.0.1:10085
   collect_interval: 30s
   report_interval: 60s
+update:
+  # 运行期自升级下载源（xray-agent upgrade / 面板触发共用）；
+  # --agent-mirror 持久化于此。空=直连 github.com，失败自动切换内置镜像候选。
+  mirror: "${AGENT_MIRROR}"
 heartbeat_interval: 30s
 reconnect_max: 60s
 EOF
