@@ -141,7 +141,7 @@ func (p *Proc) Start() error {
 	cmd.Stderr = logFile
 	setSysProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动 xray 失败: %w", err)
+		return fmt.Errorf("xray 启动失败: %w", err)
 	}
 	// 异步 Wait 回收子进程，避免僵尸（僵尸会导致 kill(pid,0) 误判存活）
 	go func() { _ = cmd.Wait() }()

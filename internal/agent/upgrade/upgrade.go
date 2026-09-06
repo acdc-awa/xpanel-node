@@ -319,7 +319,7 @@ func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) erro
 		return err
 	}
 	if Compare(CurrentVersion(), latest) >= 0 {
-		fmt.Fprintf(out, "当前版本 %s，已是最新（远端: %s）\n", CurrentVersion(), latest)
+		fmt.Fprintf(out, "已是最新版本 %s（远端: %s）\n", CurrentVersion(), latest)
 		return ErrUpToDate
 	}
 	fmt.Fprintf(out, "发现新版本 %s（当前 %s），开始升级...\n", latest, CurrentVersion())

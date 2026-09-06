@@ -72,7 +72,7 @@ func ParseChain(certPEM string) ([]*x509.Certificate, error) {
 		certs = append(certs, cert)
 	}
 	if len(certs) == 0 {
-		return nil, fmt.Errorf("证书 PEM 解析失败")
+		return nil, fmt.Errorf("证书解析失败")
 	}
 	return certs, nil
 }
@@ -99,7 +99,7 @@ func NotAfter(certPEM string) (time.Time, error) {
 func ParseKey(keyPEM string) (any, error) {
 	block, _ := pem.Decode([]byte(keyPEM))
 	if block == nil {
-		return nil, fmt.Errorf("私钥 PEM 解析失败")
+		return nil, fmt.Errorf("私钥解析失败")
 	}
 	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
 		return key, nil

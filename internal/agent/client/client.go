@@ -511,7 +511,7 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 			return &protocol.ResultPayload{OK: false, Error: "解析 sync_users 失败: " + err.Error()}
 		}
 		if c.Stats == nil {
-			return &protocol.ResultPayload{OK: false, Error: "stats collector 未初始化"}
+			return &protocol.ResultPayload{OK: false, Error: "统计采集器未初始化"}
 		}
 		if err := c.Stats.SyncUsers(context.Background(), p.Users); err != nil {
 			return &protocol.ResultPayload{OK: false, Error: err.Error()}
@@ -542,7 +542,7 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		_ = m.PayloadTo(&p)
 		logs, err := c.Xray.Logs(p.Lines)
 		if err != nil {
-			return &protocol.ResultPayload{OK: false, Error: err.Error()}
+			return &protocol.ResultPayload{OK: false, Error: "读取日志失败: " + err.Error()}
 		}
 		return &protocol.ResultPayload{OK: true, Data: logs}
 	case protocol.MsgSetupInternalAccount, protocol.MsgRotateInternalAccount:
@@ -567,7 +567,7 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 // 停摆被主控回收）。成功路径在回执刷出后延时触发重启。
 func (c *Client) handleUpgradeAgent(m *protocol.Message) *protocol.ResultPayload {
 	if c.Upgrade == nil {
-		return &protocol.ResultPayload{OK: false, Error: "节点未配置升级源（update.repo/mirror）"}
+		return &protocol.ResultPayload{OK: false, Error: "服务器未配置升级源（update.repo/mirror）"}
 	}
 	var p protocol.UpgradeAgentPayload
 	_ = m.PayloadTo(&p)
@@ -628,15 +628,16 @@ func (c *Client) runUpgrade(reqID, target string) {
 	report("downloading", fmt.Sprintf("正在从 GitHub 下载版本 %s 二进制与校验和...", target), "")
 	data, wantSum, err := c.Upgrade.Download(target)
 	if err != nil {
-		report("failed", "下载安装包失败", err.Error())
-		reply(protocol.ResultPayload{OK: false, Error: err.Error()})
+		errText := "下载安装包失败: " + err.Error()
+		report("failed", "下载安装包失败", errText)
+		reply(protocol.ResultPayload{OK: false, Error: errText})
 		return
 	}
 
 	report("verifying", "正在校验 sha256 完整性...", "")
 	if !strings.EqualFold(wantSum, upgrade.Sha256Hex(data)) {
 		errText := fmt.Sprintf("sha256 校验失败: 声明 %s 实际 %s", wantSum, upgrade.Sha256Hex(data))
-		report("failed", "校验失败", errText)
+		report("failed", "sha256 校验失败", errText)
 		reply(protocol.ResultPayload{OK: false, Error: errText})
 		return
 	}
@@ -656,8 +657,8 @@ func (c *Client) runUpgrade(reqID, target string) {
 		return
 	}
 
-	report("restarting", fmt.Sprintf("已升级 %s → %s，正在重启服务...", from, target), "")
-	reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s，节点正在重启", from, target)})
+	report("restarting", fmt.Sprintf("已升级 %s → %s，服务器正在重启…", from, target), "")
+	reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s，服务器正在重启", from, target)})
 	// 回执已写出：延时 1 秒确保 TCP 缓冲区将回执刷至主控，再触发 systemctl restart 杀掉自己
 	time.Sleep(1 * time.Second)
 	if err := c.SelfRestart(); err != nil {
@@ -683,7 +684,7 @@ func (c *Client) handleInternalAccount(m *protocol.Message, force bool) *protoco
 	}
 	var p protocol.SetupInternalAccountPayload
 	if err := m.PayloadTo(&p); err != nil {
-		return &protocol.ResultPayload{OK: false, Error: "解析失败: " + err.Error()}
+		return &protocol.ResultPayload{OK: false, Error: "解析 internal_account 失败: " + err.Error()}
 	}
 	if p.Tag == "" {
 		return &protocol.ResultPayload{OK: false, Error: "缺少 tag"}
@@ -712,7 +713,7 @@ func (c *Client) handlePushCert(m *protocol.Message) *protocol.ResultPayload {
 	}
 	var p protocol.PushCertPayload
 	if err := m.PayloadTo(&p); err != nil {
-		return &protocol.ResultPayload{OK: false, Error: "解析失败: " + err.Error()}
+		return &protocol.ResultPayload{OK: false, Error: "解析 push_cert 失败: " + err.Error()}
 	}
 	if p.Domain == "" {
 		return &protocol.ResultPayload{OK: false, Error: "缺少 domain"}
