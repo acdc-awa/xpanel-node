@@ -1,6 +1,6 @@
 // Package protocol 定义主控-节点通信协议（主控与 Agent 共用）。
 //
-// 传输：WebSocket（生产 wss 由 Caddy 终止 TLS 后以明文 ws 转发给主控，主控恒监听 ws）。
+// 传输：WebSocket（生产 wss 由用户自备反代终止 TLS 后以明文 ws 转发给主控，主控恒监听 ws）。
 // 消息：JSON 文本帧，{type, id, payload}，请求-响应用 id 配对。
 package protocol
 
@@ -28,7 +28,7 @@ const (
 	MsgSetupInternalAccount  = "setup_internal_account"  // 主控→节点：为 relay 入站生成内部 UUID
 	MsgRotateInternalAccount = "rotate_internal_account" // 主控→节点：重新生成内部 UUID
 	MsgPushCert              = "push_cert"               // 主控→节点：TLS 证书下发落盘
-	MsgInternalUUIDReport    = "internal_uuid_report"    // 节点→主控：内部 UUID 变更主动上报
+	MsgInternalUUIDReport    = "internal_uuid_report"    // 节点→主控：内部 UUID 变更主动上报（主控侧已实现接收；agent 当前不发，保留备用）
 
 	// 运维指令
 	MsgUpgradeAgent    = "upgrade_agent"    // 主控→节点：升级 agent 二进制（自升级，见 internal/agent/upgrade）

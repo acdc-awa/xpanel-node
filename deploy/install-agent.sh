@@ -6,7 +6,7 @@
 #   bash install-agent.sh --master <wss://面板域名/node/ws> --node-id <ID> --secret <SECRET> [选项]
 #
 # 选项：
-#   --master <url>       主控节点 ws 地址（生产用 wss://，由主控 Caddy 终止 TLS）
+#   --master <url>       主控节点 ws 地址（生产用 wss://，由用户自备反代终止 TLS）
 #   --node-id <id>       主控「服务器」页新增节点时生成的 node_id
 #   --secret <secret>    同上，节点密钥（仅显示一次）
 #   --agent-version <v>  钉版本安装（如 v0.1.0；缺省装最新 release）

@@ -11,7 +11,7 @@ import (
 // fullYAML 拼出合法配置：必填字段齐全，extras 追加额外字段片段。
 func fullYAML(extras string) string {
 	return "master:\n" +
-		"  url: ws://127.0.0.1:18080/api/v1/node/ws\n" +
+		"  url: ws://127.0.0.1:18082/node/ws\n" +
 		"  node_id: node-1\n" +
 		"  secret: s3cret\n" +
 		"xray:\n" +

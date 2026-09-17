@@ -39,7 +39,7 @@ type trafficKey struct {
 
 // Client 节点端客户端。
 type Client struct {
-	BaseURL         string // ws://host/api/v1/node/ws
+	BaseURL         string // ws://<主控地址>/node/ws（连接时追加 ?node_id=）
 	NodeID          string
 	Secret          string
 	Heartbeat       time.Duration

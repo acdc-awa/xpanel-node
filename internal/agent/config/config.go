@@ -23,7 +23,7 @@ type Config struct {
 }
 
 type Master struct {
-	URL    string `yaml:"url"` // 主控 ws 地址（不含 query），如 ws://127.0.0.1:18080/api/v1/node/ws
+	URL    string `yaml:"url"` // 主控 ws 地址（不含 query），如 ws://127.0.0.1:18082/node/ws
 	NodeID string `yaml:"node_id"`
 	Secret string `yaml:"secret"`
 }

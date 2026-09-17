@@ -2,7 +2,7 @@
 //
 // 约定（05 号文档 §4）：落盘 `/etc/xray/certs/<domain>/{fullchain.pem,key.pem}`，
 // fullchain 0644、key 0600，原子写；xray 默认每小时热重载证书文件，换证不重启。
-// 证书/私钥校验与解析在共享包 internal/pkg/tlscert（主控 certs API 同源）。
+// 证书/私钥校验与解析在共享包 pkg/tlscert（主控 certs API 同源）。
 package certs
 
 import (

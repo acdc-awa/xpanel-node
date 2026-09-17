@@ -6,8 +6,10 @@
 
 ## 1. 传输与帧格式
 
-- 传输：WebSocket。生产由主控侧 Caddy 终止 TLS（节点连 `wss://`，主控 WS 网关端口恒监听明文 `ws://`）。
-- 端点：对外路径为面板域名 `/node/ws`（四端口模型，2026-08-24 起；Caddy `@ws` 规则分流到 WS 端口）。
+- 传输：WebSocket。生产由**用户自备的反代**终止 TLS（节点连 `wss://`，主控 WS 网关端口恒监听明文 `ws://`）。
+  主控的 compose 不含反代，只提供 `Caddyfile` 参考模板。
+- 端点：对外路径为 `<面板域名>/node/ws`（三监听模型，2026-08-25 起；反代把 `/node/ws` 分流到主控的独立 WS 端口，
+  默认 18082）。主控侧该端口内**任意路径**都交给 WS 网关，路径由反代裁决。
 - 帧：JSON 文本帧，统一信封：
 
 ```json
@@ -19,7 +21,9 @@
 ## 2. 认证握手
 
 1. 节点连接后**首条消息必须是 `auth`**，payload：`{"node_id": "...", "secret": "..."}`。
+   连接 URL 会附带 `?node_id=<id>`（便于反代/主控侧观测与路由），身份校验仍只认首帧 `auth` 的载荷。
 2. 主控应答帧类型为 `auth_ok`（成功）或 `bad_auth`（失败，payload 为 result 结构，`error` 含原因）。
+   节点等待 `auth_ok` 有 10s 读超时，超时即视为认证失败并断开重连。
 3. 认证失败主控立即关闭连接。`secret` 不放 URL/query，避免日志泄露。
 
 ## 3. 消息类型
@@ -32,7 +36,7 @@
 | `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标与 agent 版本 |
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s） |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
-| `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更主动上报（如 CLI 轮换） |
+| `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更上报。**主控侧已实现接收**，但节点当前不发送（内部 UUID 由 `setup_internal_account` 的 `result` 回执承载），保留类型供后续使用 |
 | `upgrade_progress` | UpgradeProgressPayload | agent 升级进度状态上报（阶段流式通知，2026-09-03 新增） |
 
 ### 主控 → 节点

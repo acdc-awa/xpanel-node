@@ -95,6 +95,7 @@ type PushCertPayload struct {
 }
 
 // InternalUUIDReportPayload 节点→主控：内部 UUID 变更主动上报（如 CLI 轮换）。
+// 主控侧已实现接收；agent 当前不发（内部 UUID 经 SetupInternalResult 回执承载），保留备用。
 type InternalUUIDReportPayload struct {
 	Tag  string `json:"tag"`
 	UUID string `json:"uuid"`
