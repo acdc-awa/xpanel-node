@@ -21,17 +21,6 @@ func writePidFile(t *testing.T, p *Proc, pid int) {
 	}
 }
 
-func waitProcessGone(pid int, d time.Duration) bool {
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if !isProcessAlive(pid) {
-			return true
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return false
-}
-
 // TestStopKillsOwnedXray 伪造"我们的 xray"（argv 含配置路径），Stop 应能终止它并清理 pid 文件。
 func TestStopKillsOwnedXray(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "xray.json")
@@ -44,12 +33,21 @@ func TestStopKillsOwnedXray(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// 必须回收子进程——与 Proc.Start 里那行同理，不回收则 sh 退出后成为僵尸，而
+	// isProcessAlive 用 kill(pid,0) 判定，僵尸一直返回成功 ⇒ Stop 的宽限期循环与
+	// 存活检查都会把已退出的进程看成还活着，本用例必然超时失败（实测 5s+5s=10s）。
+	// 用 Wait 的返回作退出信号而不是轮询裸 PID：进程被回收后 PID 可能被系统复用给
+	// 别的进程，轮询会偶发误判存活。
+	exited := make(chan struct{})
+	go func() { _, _ = cmd.Process.Wait(); close(exited) }()
 	writePidFile(t, p, cmd.Process.Pid)
 
 	if err := p.Stop(); err != nil {
 		t.Fatalf("Stop 报错: %v", err)
 	}
-	if !waitProcessGone(cmd.Process.Pid, 5*time.Second) {
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
 		t.Fatal("Stop 未终止被归属的进程")
 	}
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
