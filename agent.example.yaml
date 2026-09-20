@@ -12,9 +12,10 @@ xray:
   log_path: /var/log/xray-agent/xray.log
   pid_file: /run/xray-agent/xray.pid
 
-# 以下两项可不填（代码内有默认值，install-agent.sh 也不写这两项）
+# 以下三项可不填（代码内有默认值，install-agent.sh 也不写这三项）
 # accounts_path: /etc/xray-agent/internal_accounts.json  # relay 内部账户持久化文件
 # certs_dir: /etc/xray/certs                             # push_cert 证书落盘根目录
+# outbox_path: /etc/xray-agent/traffic_outbox.json       # 流量上报发件箱（待主控回执的批次，落盘防重启丢数据）
 
 # 流量采集：对应 xray 配置的 api 段（agent 通过 gRPC 查询 stats）
 # 周期也可由主控「设置 → 节点上报」远程下发（仅当前会话生效，agent.yaml 为兜底）；

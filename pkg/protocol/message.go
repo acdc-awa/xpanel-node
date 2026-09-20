@@ -23,6 +23,9 @@ const (
 	MsgRestartXray = "restart_xray"
 	MsgGetStatus   = "get_status"
 	MsgGetLogs     = "get_logs"
+	// MsgTrafficAck 主控→节点：流量批次落库回执（审计 F1）。节点收到 ok=true 才删本地批次；
+	// 未收到（写库失败/主控崩溃/回执丢失）则保留重发，由主控侧 BatchID 去重兜住重复投递。
+	MsgTrafficAck = "traffic_ack"
 
 	// Phase T：内部账户与证书
 	MsgSetupInternalAccount  = "setup_internal_account"  // 主控→节点：为 relay 入站生成内部 UUID

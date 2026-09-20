@@ -17,6 +17,7 @@ import (
 	"github.com/acdc-awa/xpanel-node/internal/agent/client"
 	"github.com/acdc-awa/xpanel-node/internal/agent/collector"
 	"github.com/acdc-awa/xpanel-node/internal/agent/config"
+	"github.com/acdc-awa/xpanel-node/internal/agent/outbox"
 	"github.com/acdc-awa/xpanel-node/internal/agent/stats"
 	"github.com/acdc-awa/xpanel-node/internal/agent/upgrade"
 	"github.com/acdc-awa/xpanel-node/internal/agent/xrayproc"
@@ -121,6 +122,7 @@ func main() {
 		ReportInterval:  cfg.Stats.ReportInterval,
 		Accounts:        accounts.New(cfg.AccountsPath),
 		CertsDir:        cfg.CertsDir,
+		Outbox:          outbox.New(cfg.OutboxPath),
 		Upgrade:         &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror, DownloadTimeout: cfg.Update.DownloadTimeout},
 		SelfRestart:     selfRestart,
 	}

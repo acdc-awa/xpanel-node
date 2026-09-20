@@ -43,12 +43,60 @@ type TrafficEntry struct {
 	Inbound   string `json:"inbound,omitempty"`
 	UpBytes   int64  `json:"up_bytes"`
 	DownBytes int64  `json:"down_bytes"`
+	// CycleID 账期 ID：本条增量所属的用户计费周期（主控经 sync_users 下发，节点在
+	// **采集时刻**打标）。切换周期（购买/续费/重置）时主控递增该用户的 cycle_id 并立即
+	// 推送新名单，节点据此把切换前已采集的增量按旧账期结算、切换后的按新账期——
+	// 消费归属因此不再依赖上报时刻（Period），旧套餐消费不会落到新套餐头上（审计 F3）。
+	// 0 = 未知（旧 agent 未打标 / 入站维度条目无用户账期）：主控回退按 period_start 归属。
+	CycleID uint64 `json:"cycle_id,omitempty"`
 }
 
 // TrafficReportPayload 流量批量上报（P2 使用）。
 type TrafficReportPayload struct {
 	Entries []TrafficEntry `json:"entries"`
 	Period  string         `json:"period"` // 上报周期起始，RFC3339
+	// BatchID 批次唯一标识（UUID）：同一批数据重发必须复用同一 ID，主控据此去重
+	// （审计 F2：小时桶 upsert 是加法，无批次去重时重发会翻倍计量）。
+	// 空 = 旧 agent：主控不做去重、不回 ACK（维持旧行为）。
+	BatchID string `json:"batch_id,omitempty"`
+	// Seq 批次序号（跨重启单调递增）：与 BootID 合用于运维判缺口——同一 BootID 内 Seq
+	// 跳号即节点侧丢了批次。不参与去重（去重键只有 BatchID）。
+	Seq uint64 `json:"seq,omitempty"`
+	// BootID 本次 agent 进程启动的随机标识：Seq 只在同一 BootID 内有缺口语义。
+	BootID string `json:"boot_id,omitempty"`
+}
+
+// TrafficAckPayload 主控→节点：流量批次落库回执（审计 F1）。
+// 节点只在收到 ok=true 后删除本地 outbox 中的该批次；未收到回执（主控写库失败、
+// 主控崩溃、回执丢失、连接断开）时保留并重发，由主控侧 BatchID 去重兜住重复投递。
+type TrafficAckPayload struct {
+	BatchID string `json:"batch_id"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+}
+
+// CapTrafficAck 主控能力：流量批次落库回执 + BatchID 去重（见 AuthOKPayload.Caps）。
+const CapTrafficAck = "traffic_ack"
+
+// AuthOKPayload 主控→节点：认证成功回执。
+//
+// Caps 声明主控支持的可选能力，是**双向兼容的关键**：节点只有在 Caps 里看到
+// CapTrafficAck 时才进入「等回执才删批」模式。旧主控（回执只有 ok，无 caps）下节点
+// 降级为发完即删——否则未确认批次会每轮重发，而旧主控小时桶 upsert 是加法且无批次去重，
+// 同一批流量会被反复累加到用户账上。
+type AuthOKPayload struct {
+	OK   bool     `json:"ok"`
+	Caps []string `json:"caps,omitempty"`
+}
+
+// HasCap 主控是否声明支持某能力（nil Caps = 旧主控）。
+func (p AuthOKPayload) HasCap(cap string) bool {
+	for _, c := range p.Caps {
+		if c == cap {
+			return true
+		}
+	}
+	return false
 }
 
 // User 节点同步的用户信息。
@@ -58,6 +106,10 @@ type User struct {
 	Flow  string `json:"flow,omitempty"`
 	Level uint32 `json:"level,omitempty"`
 	Limit int    `json:"limit,omitempty"` // 最大在线设备数限制
+	// CycleID 该用户当前账期 ID（≥1）：节点收到与本地记录不同的值即视为发生周期切换，
+	// 立刻做一次采集把切换前的增量按旧账期封账（见 TrafficEntry.CycleID）。
+	// 0 = 旧主控未下发（节点不做切换处理，按未知账期上报）。
+	CycleID uint64 `json:"cycle_id,omitempty"`
 }
 
 // SyncUsersPayload 全量用户同步负载（InboundTag -> []User）。

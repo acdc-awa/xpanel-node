@@ -20,6 +20,9 @@ type Config struct {
 	// Phase T：内部账户与证书
 	AccountsPath string `yaml:"accounts_path"` // relay 内部账户持久化文件
 	CertsDir     string `yaml:"certs_dir"`     // push_cert 落盘根目录
+	// OutboxPath 流量上报发件箱（审计 F1）：采集到的增量先落盘成批次，收到主控落库回执才删批。
+	// 空 = 纯内存（不落盘，进程重启即丢待上报流量），生产必须给路径。
+	OutboxPath string `yaml:"outbox_path"`
 }
 
 type Master struct {
@@ -68,6 +71,7 @@ func Default() *Config {
 		},
 		AccountsPath: "/etc/xray-agent/internal_accounts.json",
 		CertsDir:     "/etc/xray/certs",
+		OutboxPath:   "/etc/xray-agent/traffic_outbox.json",
 	}
 }
 
