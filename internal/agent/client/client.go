@@ -101,6 +101,9 @@ type Client struct {
 	collectReset   chan time.Duration
 	// reportKick 立即触发一次上报（建连成功后补发积压、账期切换后尽快送达封账批次）
 	reportKick chan struct{}
+	// heartbeatKick 立即触发一次心跳（xray 放弃自动拉起等告警场景：不等下一个心跳周期，
+	// 让主控/面板马上看到失败原因）
+	heartbeatKick chan struct{}
 }
 
 // Run 常驻运行：流量采集上报 + 连接/服务/重连。
@@ -126,6 +129,7 @@ func (c *Client) Run(ctx context.Context) {
 	c.heartbeatReset = make(chan time.Duration, 1)
 	c.collectReset = make(chan time.Duration, 1)
 	c.reportKick = make(chan struct{}, 1)
+	c.heartbeatKick = make(chan struct{}, 1)
 	go c.collectLoop(ctx)
 	go c.reportLoop(ctx)
 
@@ -610,33 +614,16 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 		case d := <-c.heartbeatReset:
 			ticker.Reset(d)
 			continue
+		case <-c.heartbeatKick:
+			// 告警场景（xray 放弃自动拉起等）：立即发一帧，不等下一个周期
+			if err := c.sendHeartbeat(); err != nil {
+				log.Printf("agent: 心跳发送失败: %v（主动断开触发重连）", err)
+				_ = ws.Close()
+				return
+			}
+			ticker.Reset(c.effectiveHeartbeat())
 		case <-ticker.C:
-			snap := c.Collector.Snapshot()
-			onlineUsers := 0
-			var onlineIPs []protocol.OnlineUserIPs
-			if c.Stats != nil {
-				onlineUsers = c.Stats.OnlineUsers()
-				for _, u := range c.Stats.OnlineSnapshot() {
-					onlineIPs = append(onlineIPs, protocol.OnlineUserIPs{Email: u.Email, IPs: u.IPs})
-				}
-			}
-			hb := protocol.HeartbeatPayload{
-				CPU:         snap.CPU,
-				Mem:         snap.Mem,
-				MemTotal:    snap.MemTotal,
-				Disk:        snap.Disk,
-				DiskTotal:   snap.DiskTotal,
-				XrayRunning: c.Xray.IsRunning(),
-				OnlineUsers: onlineUsers,
-				OnlineIPs:   onlineIPs,
-				RxRate:      snap.RxRate,
-				TxRate:      snap.TxRate,
-				RxBytes:     snap.RxBytes,
-				TxBytes:     snap.TxBytes,
-				Version:     upgrade.Version,
-				TS:          time.Now().Unix(),
-			}
-			if err := c.send(protocol.MsgHeartbeat, "", hb); err != nil {
+			if err := c.sendHeartbeat(); err != nil {
 				// 写失败说明连接已坏：主动关闭唤醒阻塞中的读循环，让主循环立即重连，
 				// 而不是留下一条只进不出的僵尸连接（读侧要等 ping 超时才会发现）
 				log.Printf("agent: 心跳发送失败: %v（主动断开触发重连）", err)
@@ -644,6 +631,55 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 				return
 			}
 		}
+	}
+}
+
+// sendHeartbeat 组装并发送一帧心跳（含 xray 健康快照）。
+func (c *Client) sendHeartbeat() error {
+	snap := c.Collector.Snapshot()
+	onlineUsers := 0
+	var onlineIPs []protocol.OnlineUserIPs
+	if c.Stats != nil {
+		onlineUsers = c.Stats.OnlineUsers()
+		for _, u := range c.Stats.OnlineSnapshot() {
+			onlineIPs = append(onlineIPs, protocol.OnlineUserIPs{Email: u.Email, IPs: u.IPs})
+		}
+	}
+	hb := protocol.HeartbeatPayload{
+		CPU:         snap.CPU,
+		Mem:         snap.Mem,
+		MemTotal:    snap.MemTotal,
+		Disk:        snap.Disk,
+		DiskTotal:   snap.DiskTotal,
+		XrayRunning: c.Xray.IsRunning(),
+		OnlineUsers: onlineUsers,
+		OnlineIPs:   onlineIPs,
+		RxRate:      snap.RxRate,
+		TxRate:      snap.TxRate,
+		RxBytes:     snap.RxBytes,
+		TxBytes:     snap.TxBytes,
+		Version:     upgrade.Version,
+		TS:          time.Now().Unix(),
+	}
+	// xray 起不来时把状态与原因带回主控（面板据此显示"为什么没起来"），
+	// 成功启动后 Failures 归零、LastError 作为"最近一次失败"淡显保留。
+	if c.Xray != nil {
+		h := c.Xray.Health()
+		hb.XrayState = h.State
+		hb.XrayLastError = h.LastError
+		hb.XrayFailures = h.Failures
+		if !h.ErrorAt.IsZero() {
+			hb.XrayErrorAt = h.ErrorAt.Unix()
+		}
+	}
+	return c.send(protocol.MsgHeartbeat, "", hb)
+}
+
+// TriggerHeartbeat 立即发一帧心跳（告警用：xray 放弃自动拉起时把原因尽快送达主控）。
+func (c *Client) TriggerHeartbeat() {
+	select {
+	case c.heartbeatKick <- struct{}{}:
+	default: // 已有一帧待发
 	}
 }
 
@@ -804,6 +840,8 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		}
 		return nil
 	case protocol.MsgRestartXray:
+		// 面板显式重启：清掉"已放弃自动拉起"的失败预算，重新给 xray 一次干净的机会
+		c.Xray.ResetFailures()
 		if err := c.Xray.Stop(); err != nil {
 			return &protocol.ResultPayload{OK: false, Error: err.Error()}
 		}
@@ -816,13 +854,20 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		return &protocol.ResultPayload{OK: true, Data: "xray 已重启"}
 	case protocol.MsgGetStatus:
 		running, pid, startedAt, uptime := c.Xray.Status()
-		return &protocol.ResultPayload{OK: true, Data: protocol.StatusData{
+		sd := protocol.StatusData{
 			XrayRunning: running,
 			Pid:         pid,
 			UptimeSec:   uptime,
 			ConfigPath:  c.Xray.ConfigPath,
-			StartedAt:   startedAt,
-		}}
+		}
+		// 未托管实例（上一轮 agent 遗留、本轮未 spawn 过）没有启动时刻：留空比给零值好，
+		// 否则前端会把它渲染成 0001-01-01。
+		if !startedAt.IsZero() {
+			sd.StartedAt = &startedAt
+		}
+		h := c.Xray.Health()
+		sd.XrayState, sd.XrayLastError, sd.XrayFailures = h.State, h.LastError, h.Failures
+		return &protocol.ResultPayload{OK: true, Data: sd}
 	case protocol.MsgGetLogs:
 		var p protocol.GetLogsPayload
 		_ = m.PayloadTo(&p)

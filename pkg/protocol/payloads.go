@@ -24,6 +24,12 @@ type HeartbeatPayload struct {
 	TxBytes     uint64          `json:"tx_bytes"`          // 累计物理网卡发送字节
 	Version     string          `json:"version,omitempty"` // agent 版本（旧 agent 不上报）
 	TS          int64           `json:"ts"`                // unix 秒
+	// 启动失败可观测性（2026-09-21）：xray 起不来时把状态与原因带回主控，
+	// 面板不再只看到"未运行"却不知道为什么。旧主控忽略未知字段、旧 agent 不发（字段为空）。
+	XrayState     string `json:"xray_state,omitempty"`            // running / restarting / failed / stopped
+	XrayLastError string `json:"xray_last_error,omitempty"`       // 最近一次启动失败原因（已截断）
+	XrayErrorAt   int64  `json:"xray_error_at,omitempty"`         // 该原因的观测时刻（unix 秒）
+	XrayFailures  int    `json:"xray_restart_failures,omitempty"` // 连续启动失败次数
 }
 
 // OnlineUserIPs 单个用户当前活跃连接的去重源 IP（refcount 快照，连接断开即移除；
@@ -160,7 +166,7 @@ type UpgradeAgentPayload struct {
 
 // UpgradeProgressPayload 节点→主控：升级进度上报。
 type UpgradeProgressPayload struct {
-	Phase   string `json:"phase"`   // starting | checking | downloading | verifying | replacing | restarting | failed | success
+	Phase   string `json:"phase"` // starting | checking | downloading | verifying | replacing | restarting | failed | success
 	Target  string `json:"target,omitempty"`
 	Message string `json:"message"`
 	Error   string `json:"error,omitempty"`
@@ -186,9 +192,13 @@ type GetStatusPayload struct{}
 
 // StatusData Agent 返回的完整状态。
 type StatusData struct {
-	XrayRunning bool      `json:"xray_running"`
-	Pid         int       `json:"pid,omitempty"`
-	UptimeSec   int64     `json:"uptime_sec,omitempty"`
-	ConfigPath  string    `json:"config_path,omitempty"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
+	XrayRunning bool       `json:"xray_running"`
+	Pid         int        `json:"pid,omitempty"`
+	UptimeSec   int64      `json:"uptime_sec,omitempty"`
+	ConfigPath  string     `json:"config_path,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"` // 未托管实例（上一轮 agent 遗留）无此值
+	// 启动失败可观测性（2026-09-21，旧主控忽略未知字段）
+	XrayState     string `json:"xray_state,omitempty"`
+	XrayLastError string `json:"xray_last_error,omitempty"`
+	XrayFailures  int    `json:"xray_restart_failures,omitempty"`
 }

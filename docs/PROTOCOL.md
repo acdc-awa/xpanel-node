@@ -36,7 +36,7 @@
 | type | payload | 说明 |
 |---|---|---|
 | `auth` | AuthPayload | 首条认证消息（见 §2） |
-| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标与 agent 版本 |
+| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标、agent 版本与 xray 健康状态（`xray_state`/`xray_last_error`/`xray_error_at`/`xray_restart_failures`，2026-09-21 新增；旧主控忽略未知字段、旧 agent 不发送） |
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s）。带 `batch_id` 的批次，主控落库后回 `traffic_ack` |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
 | `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更上报。**主控侧已实现接收**，但节点当前不发送（内部 UUID 由 `setup_internal_account` 的 `result` 回执承载），保留类型供后续使用 |
@@ -95,12 +95,31 @@ UpgradeProgressPayload { phase, target?, message, error?, ts }
 AgentSettingsPayload { report_interval_sec?, heartbeat_interval_sec? }
                     // 秒；0=不变；clamp 5s–30min；仅当前会话生效（不写回 agent.yaml）
 ResultPayload      { ok, error?, data? }
-StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at? }
+StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at?,
+                     xray_state?, xray_last_error?, xray_restart_failures? }
+                     // xray_state: running / restarting / failed / stopped（2026-09-21 新增）
+                     // failed = 连续启动失败达上限、已停止自动拉起（等慢探底自愈或面板「重启 Xray」）
+                     // started_at 缺省 = 未托管实例（上一轮 agent 遗留、本轮未 spawn 过），此时 uptime_sec 为 0
 ```
 
 ## 5. 时序
 
 - **心跳**：默认 30s 一次。主控落 `last_seen_at` + `status=1` + `agent_version`（有上报时），并写 `node_reports` 供仪表盘趋势。
+  **xray 启动失败可观测性**（2026-09-21）：xray 起不来时，节点把状态与原因（退出码 + xray 自身 stderr
+  摘要）随心跳回传，主控落 `servers.xray_state / xray_last_error / xray_error_at / xray_failures`，
+  面板直接显示为什么没起来（旧 agent 不发这些字段，主控保持已有值不覆盖）。
+  **启动成功判据**：spawn 成功 **且** 进程活过就绪窗口（800ms）——`xray -test` 只做配置解析、
+  不绑定端口，所以「过 -test」不代表能跑（实机事故：caddy 占 443，`-test` 打印 Configuration OK.
+  而 `run` 秒死 `failed to listen TCP on 443 ... bind: address already in use`）。
+  **停止永无止境的重启**：连续启动失败按 2s→4s→…→60s 退避，达 8 次即放弃自动拉起（状态 `failed`）
+  并在跃迁时记一条 `system` 审计（`servers.xray_start_failed`；恢复时 `servers.xray_recovered`）作为报警。
+  放弃后每 10 分钟慢探底一次：探底失败不增失败计数、不重复告警（面板数字停在放弃那一刻），
+  探底成功即自动回到 `running`（环境类故障修好后无需人工介入）。
+  恢复途径：慢探底自愈 / 面板「重启 Xray」/ 重新下发配置（后两者立即重置失败预算）。
+  **同内容冷却**：主控每 2 分钟补推一次待推送配置，而每次应用都要先停掉正在服务的 xray
+  （失败还要回滚重启一次）。因此"过了 -test 却起不来"的配置在应用失败后进入 5 分钟冷却，
+  冷却内主控重推同一份内容会被直接拒绝（`ok=false`，附冷却说明）且**不碰运行中的进程**；
+  冷却过后自动放行重试，换一份内容或管理员「重启 Xray」也会立即放行。
 - **流量上报**：默认 60s 一次，主控落 `traffic_logs` 并按周期聚合。
   **至少一次投递 + 主控去重**（v0.1.14+）：采集到的增量先落盘成不可变批次（`outbox_path`，默认
   `/etc/xray-agent/traffic_outbox.json`），上报后等 `traffic_ack`，只有 `ok=true` 才删批。主控把

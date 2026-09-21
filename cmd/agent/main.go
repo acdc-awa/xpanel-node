@@ -81,23 +81,22 @@ func main() {
 	// 自举：无配置时写入内嵌最小模板（log + api gRPC inbound(127.0.0.1:10085) + stats 等），
 	// 保证 xray 装好即可启动、与 agent 的 gRPC 通信立即可用，不必等主控首次推送；
 	// 主控推送到达后 RestartWithConfig 无缝覆盖，watchdog 此后按既有逻辑保活。
-	if written, err := xrayproc.EnsureBootstrapConfig(cfg.Xray.ConfigPath); err != nil {
-		log.Printf("写入自举最小配置失败（xray 暂不启动，待主控推送配置）: %v", err)
-	} else if written {
-		log.Printf("已写入自举最小配置: %s", cfg.Xray.ConfigPath)
+	// 开机体检：配置缺失写自举模板；-test 不通过则回退上一份可用配置（.good）——
+	// 旧实现直接把坏配置交给 xray，watchdog 用坏配置反复拉起失败，节点永久宕机且无从知晓。
+	if note := proc.EnsureUsableConfig(); note != "" {
+		log.Printf("xray-agent: %s", note)
 	}
 
-	// 启动时若已有配置则拉起 xray（崩溃由 watchdog 保持）
+	// 启动时若已有配置则拉起 xray（崩溃由 watchdog 保持）。
+	// Start 现在要求"spawn 成功且活过就绪窗口"才算起来，失败会把退出码与 xray 自身的
+	// stderr 摘要写进日志（旧实现只说"xray 已启动"，秒死也照说不误）。
 	if _, err := os.Stat(cfg.Xray.ConfigPath); err == nil {
 		if err := proc.Start(); err != nil {
-			log.Printf("xray 启动失败（watchdog 将重试）: %v", err)
+			log.Printf("xray 启动失败（watchdog 将按退避重试，原因会随心跳上报主控）: %v", err)
 		} else {
 			log.Printf("xray 已启动")
 		}
 	}
-
-	wdStop := make(chan struct{})
-	go proc.Watchdog(wdStop)
 
 	statsCollector := stats.New(cfg.Stats.APIAddr)
 
@@ -134,6 +133,15 @@ func main() {
 		statsCollector.ResetUsers()
 		cli.TriggerReconnect()
 	}
+	// 放弃自动拉起时立刻推一帧心跳：主控/面板立即拿到失败原因（报警），不必等下一个周期。
+	proc.OnGiveUp = func(reason string) {
+		cli.TriggerHeartbeat()
+	}
+
+	// 看门狗在回调就位之后再启动：它在锁内读 OnRestart/OnGiveUp，先启动会与之竞态，
+	// 且放弃告警在回调为空时无处投递。xray 已在上面 Start 过一次，这里只是兜底巡检。
+	wdStop := make(chan struct{})
+	go proc.Watchdog(wdStop)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
