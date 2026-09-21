@@ -69,6 +69,15 @@ func fakeRun(path string) {
 			_ = f.Close()
 		}
 	}
+	// CHATTY：冒充真实 xray 的访问日志形态——就绪窗口之后仍持续往 stdout 写。
+	// 这是复现「日志文件被提前关闭 → os/exec 关掉管道读端 → 子进程写 stdout 收 SIGPIPE
+	// 无声死亡」的必要条件：子进程必须在窗口之后继续写，才可能撞上坏管道。
+	if strings.Contains(fakeReadConfig(path), "CHATTY") {
+		for i := 0; ; i++ {
+			fmt.Printf("from 127.0.0.1:50786 accepted tcp:127.0.0.1:10085 [api -> api] #%d\n", i)
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
 	if !strings.Contains(fakeReadConfig(path), "DIE") {
 		time.Sleep(60 * time.Second) // 冒充"活着"：由用例显式杀掉
 		os.Exit(0)
@@ -180,6 +189,34 @@ func TestStartHealthyClearsFailures(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && h.State != "running" {
 		t.Fatalf("状态应为 running，实际 %q", h.State)
+	}
+}
+
+// TestStartKeepsChildStdoutUsableAfterReadyWindow 就绪窗口之后子进程写 stdout 必须仍然有效。
+//
+// 2026-09-21 实机事故（v0.1.15）：xray 起来后每隔几秒无声死亡，失败原因是「退出码 -1:
+// ... core: Xray 26.6.27 started」——退出码 -1 且 stderr 停在就绪窗口内的最后一行。
+// 根因：startLocked 用 io.MultiWriter(logFile, tail) 作 Stdout/Stderr，writer 不是 *os.File，
+// os/exec 于是建管道 + 拷贝 goroutine（exec.go:601），而 startLocked 返回时 `defer
+// logFile.Close()` 关掉了日志文件——拷贝 goroutine 下一次写就失败退出，os/exec 随即关掉
+// 管道读端（exec.go:603）；子进程此后任何一次写 stdout/stderr 都会收到 SIGPIPE 当场死亡
+// （Go 对 fd 1/2 的 SIGPIPE 不忽略，直接以信号终止）。真实 xray 的访问日志/api 连接日志
+// 正是"窗口之后才写"的形态，所以表现为"起得来、几秒后无声死、日志停在 started"。
+func TestStartKeepsChildStdoutUsableAfterReadyWindow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGPIPE 是 POSIX 语义：Windows 上写坏管道只返回错误，不会终止子进程")
+	}
+	p := fakeProc(t, `{"inbounds":[{"port":443,"tag":"CHATTY"}]}`)
+	if err := p.Start(); err != nil {
+		t.Fatalf("首次启动应成功（就绪窗口内进程活着）: %v", err)
+	}
+	// 窗口之后子进程仍在写 stdout（每 200ms 一行）：坏管道会在此后 1-2 次写内杀死它。
+	// 断言必须发生在 check() 之前——看门狗会把死掉的 xray 重新拉起来，掩盖这次死亡。
+	time.Sleep(3 * time.Second)
+	if !p.IsRunning() {
+		p.check() // 吸收退出信息，让断言消息带上记录到的失败原因
+		t.Fatalf("就绪窗口后子进程应继续存活，实际已死（记录原因: %q）；"+
+			"说明日志文件被提前关闭，子进程写 stdout 时收到 SIGPIPE", p.Health().LastError)
 	}
 }
 

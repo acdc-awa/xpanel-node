@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -13,6 +14,22 @@ import (
 
 // 错误摘要上限：回传主控的错误文本按 rune 截断（模型列宽 512，留足前缀余量）。
 const maxErrText = 300
+
+// logSink 把日志文件包成"永不失败"的 writer：写不进去只丢这一行日志，绝不把错误往上抛。
+//
+// 为什么必须这样（2026-09-21 实机事故）：子进程的 stdout/stderr 经 os/exec 的管道 + 拷贝
+// goroutine 落到这里（writer 不是 *os.File 时 os/exec 必建管道，见 exec.go writerDescriptor）。
+// 拷贝 goroutine 一旦因写失败退出，os/exec 会顺手关掉管道读端（exec.go:603 `pr.Close()`），
+// 而 Go 对 fd 1/2 的 SIGPIPE **不忽略**——子进程此后任何一次写 stdout/stderr 都会被 SIGPIPE
+// 当场杀死（退出码 -1、无任何错误输出、日志停在窗口内最后一行）。
+// 于是"日志文件不可写"（磁盘满/被删/权限）会升级成"节点 xray 每隔几秒无声死一次"，
+// 而运维看到的只是"进程莫名其妙没了"。丢日志可以，丢进程不行。
+type logSink struct{ w io.Writer }
+
+func (s logSink) Write(p []byte) (int, error) {
+	_, _ = s.w.Write(p)
+	return len(p), nil
+}
 
 // ringBuffer 定长环形缓冲，保留最近写入的字节。
 // 子进程的 stdout/stderr 同时写日志文件与这里：文件是运维现场（跨次累积、分不清属于哪一次启动），

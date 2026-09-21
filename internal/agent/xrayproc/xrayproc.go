@@ -76,6 +76,11 @@ type run struct {
 	code     int
 	at       time.Time
 	absorbed bool
+	// logFile 本次运行的日志文件。子进程的 stdout/stderr 经 os/exec 的管道 + 拷贝 goroutine
+	// 落到这里（writer 不是 *os.File 时 os/exec 必建管道），因此**必须持有到子进程退出为止**：
+	// 提前关闭会让拷贝 goroutine 写失败退出，os/exec 随即关掉管道读端，子进程下一次写
+	// stdout 就收到 SIGPIPE 当场死亡（见 logSink 注释）。
+	logFile *os.File
 }
 
 // Health xray 健康快照（心跳上报主控，面板据此显示状态与失败原因）。
@@ -239,16 +244,16 @@ func (p *Proc) startLocked(probe bool) error {
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
 
 	cmd := exec.Command(p.Bin, "run", "-c", p.ConfigPath)
-	r := &run{tail: newRingBuffer(stderrTailBytes), exited: make(chan struct{})}
+	r := &run{tail: newRingBuffer(stderrTailBytes), exited: make(chan struct{}), logFile: logFile}
 	// stderr/stdout 同时落日志文件与环形缓冲：文件是运维现场（跨次累积），
-	// 缓冲用于把「本次启动」的致命错误摘要回传主控。
-	cmd.Stdout = io.MultiWriter(logFile, r.tail)
-	cmd.Stderr = io.MultiWriter(logFile, r.tail)
+	// 缓冲用于把「本次启动」的致命错误摘要回传主控。logSink 保证写日志失败不会连带杀死子进程。
+	cmd.Stdout = io.MultiWriter(logSink{logFile}, r.tail)
+	cmd.Stderr = io.MultiWriter(logSink{logFile}, r.tail)
 	setSysProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
 		reason := fmt.Sprintf("xray 启动失败: %v", err)
 		p.noteFailureLocked(reason, time.Now(), true, probe)
 		return errors.New(reason)
@@ -261,10 +266,12 @@ func (p *Proc) startLocked(probe bool) error {
 	}
 	// 异步 Wait 回收子进程，避免僵尸（僵尸会导致 kill(pid,0) 误判存活），
 	// 同时把退出码与 stderr 尾部留档——旧实现直接丢弃，导致"为什么没起来"无从回答。
+	// 日志文件在 Wait 返回后关闭：此时 os/exec 的拷贝 goroutine 已结束，关闭不再影响任何人。
 	go func() {
 		werr := cmd.Wait()
 		r.code = exitCodeOf(werr)
 		r.at = time.Now()
+		_ = logFile.Close()
 		close(r.exited)
 	}()
 
