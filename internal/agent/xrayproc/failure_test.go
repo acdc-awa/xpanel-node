@@ -153,8 +153,8 @@ func TestWriteConfigIfValidDoesNotRestart(t *testing.T) {
 	if _, pidAfter, _, _ := p.Status(); pidAfter != pidBefore {
 		t.Fatalf("热更落盘不得重启 xray：pid %d → %d", pidBefore, pidAfter)
 	}
-	if _, err := os.Stat(p.ConfigPath + goodSuffix); err == nil {
-		t.Fatal(".good 不得被热更落盘覆盖（那份内容还没被启动验证过）")
+	if got := readFile(t, p.ConfigPath+goodSuffix); got != hot {
+		t.Fatalf(".good 应同步更新为最新已验证热更配置，实际: %s", got)
 	}
 
 	if err := p.WriteConfigIfValid(`{"BADTEST":true}`); err == nil {

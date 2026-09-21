@@ -18,6 +18,7 @@
 package outbox
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -80,6 +81,8 @@ type Outbox struct {
 	maxAge time.Duration
 	// maxBatches 批次数量上限（安全阀，防长期离线把磁盘写满）：超出时丢最旧的并告警。
 	maxBatches int
+	// maxBytes 文件字节大小上限（默认 10MB）：超出时丢最旧的，防离线大文件撑爆磁盘。
+	maxBytes int
 
 	bootID string
 
@@ -90,10 +93,11 @@ type Outbox struct {
 	dropped int
 }
 
-// 默认阈值（构造时可覆盖，见 SetLimits）。
+// 默认阈值（构造时可覆盖，见 SetLimits / SetMaxBytes）。
 const (
 	DefaultMaxAge     = 7 * 24 * time.Hour
 	DefaultMaxBatches = 20000
+	DefaultMaxBytes   = 10 * 1024 * 1024 // 10MB
 )
 
 // New 创建发件箱（path 由 agent 配置注入，默认 /etc/xray-agent/traffic_outbox.json）。
@@ -103,6 +107,7 @@ func New(path string) *Outbox {
 		path:       path,
 		maxAge:     DefaultMaxAge,
 		maxBatches: DefaultMaxBatches,
+		maxBytes:   DefaultMaxBytes,
 		bootID:     newID(),
 	}
 }
@@ -119,6 +124,15 @@ func (o *Outbox) SetLimits(maxAge time.Duration, maxBatches int) {
 	}
 	if maxBatches > 0 {
 		o.maxBatches = maxBatches
+	}
+}
+
+// SetMaxBytes 覆盖发件箱文件字节上限（测试用；生产走默认 10MB）。
+func (o *Outbox) SetMaxBytes(maxBytes int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if maxBytes > 0 {
+		o.maxBytes = maxBytes
 	}
 }
 
@@ -150,6 +164,12 @@ func (o *Outbox) Load() error {
 		if rerr := os.Rename(o.path, quarantine); rerr != nil {
 			return fmt.Errorf("流量发件箱损坏且隔离失败: %w（解析错误: %v）", rerr, err)
 		}
+		if salvaged, seq := salvageBatches(data); len(salvaged) > 0 {
+			o.seq = seq
+			saved, _ := o.saveLocked(seq, salvaged)
+			o.batches = saved
+			return fmt.Errorf("流量发件箱损坏，已隔离为 %s 并抢救恢复 %d 个批次（解析错误: %v）", quarantine, len(salvaged), err)
+		}
 		o.batches = nil
 		return fmt.Errorf("流量发件箱损坏，已隔离为 %s 并以空发件箱继续（解析错误: %v）", quarantine, err)
 	}
@@ -179,11 +199,12 @@ func (o *Outbox) Append(entries []Entry) (Batch, bool, error) {
 	next := make([]Batch, 0, len(o.batches)+1)
 	next = append(next, o.batches...)
 	next = append(next, b)
-	if err := o.saveLocked(o.seq+1, next); err != nil {
+	saved, err := o.saveLocked(o.seq+1, next)
+	if err != nil {
 		return Batch{}, false, err
 	}
 	o.seq++
-	o.batches = next
+	o.batches = saved
 	return b, true, nil
 }
 
@@ -241,10 +262,11 @@ func (o *Outbox) Ack(batchID string) (bool, error) {
 	next := make([]Batch, 0, len(o.batches)-1)
 	next = append(next, o.batches[:idx]...)
 	next = append(next, o.batches[idx+1:]...)
-	if err := o.saveLocked(o.seq, next); err != nil {
+	saved, err := o.saveLocked(o.seq, next)
+	if err != nil {
 		return false, err
 	}
-	o.batches = next
+	o.batches = saved
 	return true, nil
 }
 
@@ -272,11 +294,12 @@ func (o *Outbox) DropExpired(now time.Time) int {
 	if dropped == 0 {
 		return 0
 	}
-	if err := o.saveLocked(o.seq, kept); err != nil {
+	saved, err := o.saveLocked(o.seq, kept)
+	if err != nil {
 		// 落盘失败：不提交内存变更，下轮再试（避免磁盘与内存不一致）
 		return 0
 	}
-	o.batches = kept
+	o.batches = saved
 	o.dropped += dropped
 	return dropped
 }
@@ -288,30 +311,94 @@ func (o *Outbox) Dropped() int {
 	return o.dropped
 }
 
-// saveLocked 原子落盘（同目录临时文件 + rename，权限 600）。纯内存模式直接返回。
-func (o *Outbox) saveLocked(seq uint64, batches []Batch) error {
+// saveLocked 原子落盘（同目录临时文件 + fsync + rename，权限 600）。纯内存模式直接返回。
+func (o *Outbox) saveLocked(seq uint64, batches []Batch) ([]Batch, error) {
 	if o.path == "" {
-		return nil
+		return batches, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(o.path), 0o755); err != nil {
-		return fmt.Errorf("创建发件箱目录失败: %w", err)
+		return nil, fmt.Errorf("创建发件箱目录失败: %w", err)
 	}
 	if batches == nil {
 		batches = []Batch{}
 	}
-	data, err := json.Marshal(file{Seq: seq, Batches: batches})
-	if err != nil {
-		return fmt.Errorf("序列化发件箱失败: %w", err)
+
+	maxB := o.maxBytes
+	if maxB <= 0 {
+		maxB = DefaultMaxBytes
 	}
+	var data []byte
+	var err error
+	for {
+		data, err = json.Marshal(file{Seq: seq, Batches: batches})
+		if err != nil {
+			return nil, fmt.Errorf("序列化发件箱失败: %w", err)
+		}
+		if len(data) <= maxB || len(batches) <= 1 {
+			break
+		}
+		o.dropped++
+		batches = batches[1:]
+	}
+
 	tmp := o.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("写发件箱临时文件失败: %w", err)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("打开发件箱临时文件失败: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("写发件箱临时文件失败: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("同步发件箱临时文件失败: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return nil, fmt.Errorf("关闭发件箱临时文件失败: %w", err)
 	}
 	if err := os.Rename(tmp, o.path); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("替换发件箱失败: %w", err)
+		return nil, fmt.Errorf("替换发件箱失败: %w", err)
 	}
-	return nil
+	return batches, nil
+}
+
+// salvageBatches 尝试从损坏的 JSON 中抢救解析出完整的批次，避免全包丢弃。
+func salvageBatches(data []byte) ([]Batch, uint64) {
+	idx := bytes.Index(data, []byte(`"batches"`))
+	if idx < 0 {
+		return nil, 0
+	}
+	arrayStart := bytes.IndexByte(data[idx:], '[')
+	if arrayStart < 0 {
+		return nil, 0
+	}
+	dec := json.NewDecoder(bytes.NewReader(data[idx+arrayStart:]))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('[') {
+		return nil, 0
+	}
+	var batches []Batch
+	for dec.More() {
+		var b Batch
+		if err := dec.Decode(&b); err != nil {
+			break
+		}
+		if b.ID != "" && len(b.Entries) > 0 {
+			batches = append(batches, b)
+		}
+	}
+	var maxSeq uint64
+	for _, b := range batches {
+		if b.Seq > maxSeq {
+			maxSeq = b.Seq
+		}
+	}
+	return batches, maxSeq
 }
 
 // cloneBatch 深拷贝（Entries 切片必须复制，否则锁外读取与后续修改竞态）。

@@ -20,12 +20,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// TagPattern 严格限制版本标签格式，防路径穿越与 URL 注入。
+var TagPattern = regexp.MustCompile(`^v?\d+(\.\d+)+(-[0-9A-Za-z.-]+)?$`)
 
 // Version 当前 agent 版本（构建期 -ldflags -X 注入；"dev" 为默认开发值）。
 var Version = "dev"
@@ -246,6 +250,9 @@ func (f *Fetcher) Download(tag string) ([]byte, string, error) {
 
 // downloadFrom 从单个镜像基址取资产 + checksums.txt 并解析期望摘要。
 func (f *Fetcher) downloadFrom(base, tag, asset string) ([]byte, string, error) {
+	if !TagPattern.MatchString(tag) {
+		return nil, "", fmt.Errorf("无效的版本标签: %s", tag)
+	}
 	_, dl := f.clients()
 	urlBase := base + "/" + f.repo() + "/releases/download/" + tag
 
@@ -322,6 +329,9 @@ func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) erro
 // force 为 true 时只要版本不完全相同即允许降级回滚。
 func ApplyTarget(f *Fetcher, target string, force bool, exePath string, restart func() error, out io.Writer) error {
 	target = strings.TrimSpace(target)
+	if target != "" && !TagPattern.MatchString(target) {
+		return fmt.Errorf("无效的目标版本号: %s", target)
+	}
 	if target == "" {
 		latest, err := f.Latest()
 		if err != nil {

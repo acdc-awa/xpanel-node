@@ -63,7 +63,7 @@ var (
 	// crashWindow/crashWindowCount：窗口外死亡（跑了一阵才崩）的滑动窗口。这类死亡原本每次
 	// 把连续失败重置为 1，于是「每隔 60s+ 死一次」（如被 OOM 杀）永远到不了上限、永不告警、
 	// 永远以 2s 节奏重启；窗口内累计到阈值即视为故障，与秒死共用同一套计数与放弃通道。
-	crashWindow      = 10 * time.Minute
+	crashWindow      = 30 * time.Minute
 	crashWindowCount = 3
 )
 
@@ -325,15 +325,9 @@ func (p *Proc) startLocked(probe bool) error {
 		return fmt.Errorf("xray 启动后立即退出（%s）", p.absorbExitLocked(r, probe))
 	case <-time.After(readyWindow):
 	}
-	// 进程活过就绪窗口：清除退避重试时刻
+	// 进程活过就绪窗口：启动成功，清除退避重试时刻与连续失败计数，解除放弃态与回退标志
 	p.nextTryAt = time.Time{}
-	if probe {
-		// 慢探底成功：环境已恢复，解除放弃态与失败计数
-		p.failures, p.gaveUp = 0, false
-	} else if !p.startedAt.IsZero() && time.Since(p.startedAt) >= startFailureGrace {
-		// 存活时间已满足稳定运行阈值：清零连续失败与回退标志
-		p.failures, p.gaveUp, p.goodTried = 0, false, false
-	}
+	p.failures, p.gaveUp, p.goodTried, p.goodRollbackPending = 0, false, false, false
 	// 注意：p.crashTimes 为 10 分钟滑动窗口，绝不在就绪窗口结束时清空；
 	// 它按时间自淘汰，或在 ResetFailures 时显式清零。
 	// 记下「本进程启动时磁盘上的内容」：心跳把它与磁盘哈希一起上报，主控据此判断
@@ -454,11 +448,10 @@ func (p *Proc) tmpConfigPath(tag string) string {
 // 绝不能 Stop/Start——它只是把同一份用户集写下去，好让节点重启（自愈 / 开机 / 手动重启）
 // 不会把用户集回退到上一次冷更。
 //
-// 与 RestartWithConfig 的两点刻意差异：
+// 与 RestartWithConfig 的刻意差异：
 //  1. 不碰同内容冷却：内容冷却针对的是"整份配置应用失败"，用去拒绝热更会让封禁 / 到期
 //     用户摘不掉（把一个小问题放大成 P1 同类的问题）。这里 -test 不过就直接报错回主控。
-//  2. 不更新 .good：.good 的语义是"最后一次真正启动成功过的配置"，而这份内容还没被启动
-//     验证过（没重启），顶掉它会让开机回退退到一份未经验证的内容。
+//  2. 验证通过且原子落盘成功后，同步刷新 .good 副本，防止崩溃回退覆盖为过期的旧冷推配置复活已删/到期用户。
 func (p *Proc) WriteConfigIfValid(configJSON string) error {
 	if configJSON == "" {
 		return nil
@@ -477,6 +470,8 @@ func (p *Proc) WriteConfigIfValid(configJSON string) error {
 	if err := os.Rename(tmp, p.ConfigPath); err != nil {
 		return fmt.Errorf("替换配置失败: %w", err)
 	}
+	// 热更配置落盘且通过 -test：同步刷新 .good 副本
+	_ = copyFile(p.ConfigPath, p.ConfigPath+goodSuffix)
 	return nil
 }
 
@@ -597,10 +592,13 @@ func (p *Proc) check() {
 	if running {
 		p.mu.Lock()
 		if p.failures > 0 && !p.startedAt.IsZero() && time.Since(p.startedAt) >= startFailureGrace {
-			// 进程已稳定运行超过启动宽限期：清零连续启动失败计数与 .good 回退标志
-			p.failures = 0
-			p.gaveUp = false
-			p.goodTried = false
+			// 若当前未处于滑动窗口高频崩溃状态，清零启动失败计数与 .good 回退标志
+			if len(p.crashTimes) < crashWindowCount {
+				p.failures = 0
+				p.gaveUp = false
+				p.goodTried = false
+				p.goodRollbackPending = false
+			}
 		}
 		p.mu.Unlock()
 		return
@@ -779,7 +777,7 @@ func (p *Proc) noteStartFailureLocked(reason string, at time.Time, quick bool) {
 		}
 		p.crashTimes = kept
 		if len(p.crashTimes) >= crashWindowCount {
-			p.failures++
+			p.failures = len(p.crashTimes) - crashWindowCount + 2
 		} else {
 			p.failures = 1
 		}
@@ -836,7 +834,7 @@ func (p *Proc) ResetFailures() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.failures, p.gaveUp, p.nextTryAt = 0, false, time.Time{}
-	p.crashTimes, p.goodTried = nil, false
+	p.crashTimes, p.goodTried, p.goodRollbackPending = nil, false, false
 	p.clearRejectedLocked()
 }
 

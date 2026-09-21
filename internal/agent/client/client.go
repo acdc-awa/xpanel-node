@@ -943,6 +943,13 @@ func (c *Client) runUpgrade(reqID, target string, force bool) {
 	}
 
 	report("checking", "正在查询目标版本...", "")
+	target = strings.TrimSpace(target)
+	if target != "" && !upgrade.TagPattern.MatchString(target) {
+		errText := "目标版本号格式不正确: " + target
+		report("failed", "目标版本号格式不正确", errText)
+		reply(protocol.ResultPayload{OK: false, Error: errText})
+		return
+	}
 	if target == "" {
 		latest, err := c.Upgrade.Latest()
 		if err != nil {
@@ -961,8 +968,9 @@ func (c *Client) runUpgrade(reqID, target string, force bool) {
 		return
 	}
 	if force && from != "dev" && (from == target || cmp == 0) {
-		report("success", fmt.Sprintf("当前已是版本 %s，无需操作", from), "")
-		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("当前已是版本 %s，无需操作", from)})
+		errMsg := fmt.Sprintf("当前已是版本 %s，无需回滚", from)
+		report("failed", errMsg, "")
+		reply(protocol.ResultPayload{OK: false, Error: errMsg, Data: errMsg})
 		return
 	}
 

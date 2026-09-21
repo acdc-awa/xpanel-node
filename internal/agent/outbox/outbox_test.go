@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -291,3 +292,90 @@ func TestFileShapeStable(t *testing.T) {
 		t.Fatalf("账期 ID 应落盘，实际 %+v", f.Batches[0].Entries[0])
 	}
 }
+
+// TestMaxBytesLimit 文件大小超过上限时丢弃最旧批次。
+func TestMaxBytesLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "traffic_outbox.json")
+	o := New(path)
+	_ = o.Load()
+
+	b1, _, err := o.Append([]Entry{{Email: "u1@panel.local", Up: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat1, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 设置 maxBytes 为略大于 1 个批次但容不下 2 个批次的大小
+	o.SetMaxBytes(int(stat1.Size()) + 50)
+
+	b2, _, err := o.Append([]Entry{{Email: "u2@panel.local", Up: 200}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if o.Dropped() == 0 {
+		t.Fatalf("超字节上限应记录丢弃，实际 dropped = %d", o.Dropped())
+	}
+	batches, entries := o.Pending()
+	if batches != 1 || entries != 1 {
+		t.Fatalf("超上限修剪后应保留最新 1 批 1 条，实际 %d 批 %d 条", batches, entries)
+	}
+	oldest, ok := o.Oldest()
+	if !ok || oldest.ID != b2.ID {
+		t.Fatalf("保留的应是最新批次 b2(%s)，实际 %+v", b2.ID, oldest)
+	}
+	_ = b1
+}
+
+// TestSalvageBatchesOnTruncatedFile 截断/部分损坏文件可抢救出前序完整批次。
+func TestSalvageBatchesOnTruncatedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "traffic_outbox.json")
+	o := New(path)
+	_ = o.Load()
+
+	b1, _, _ := o.Append([]Entry{{Email: "u1@panel.local", Up: 100}})
+	b2, _, _ := o.Append([]Entry{{Email: "u2@panel.local", Up: 200}})
+	b3, _, _ := o.Append([]Entry{{Email: "u3@panel.local", Up: 300}})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 找到 b3 的位置并在其内部截断，模拟写入过程中突发断电导致 JSON 尾部损坏
+	idx := strings.Index(string(raw), b3.ID)
+	if idx < 0 {
+		t.Fatalf("未找到 b3 ID %s", b3.ID)
+	}
+	truncated := raw[:idx+10]
+	if err := os.WriteFile(path, truncated, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重新加载损坏文件
+	o2 := New(path)
+	err = o2.Load()
+	if err == nil {
+		t.Fatal("损坏文件 Load 应返回 error 供告警")
+	}
+	if !strings.Contains(err.Error(), "抢救恢复") {
+		t.Fatalf("错误信息应说明已抢救恢复，实际: %v", err)
+	}
+
+	// 验证成功抢救出了 b1 和 b2
+	batches, entries := o2.Pending()
+	if batches != 2 || entries != 2 {
+		t.Fatalf("应抢救出 2 批 2 条，实际 %d 批 %d 条", batches, entries)
+	}
+	oldest, ok := o2.Oldest()
+	if !ok || oldest.ID != b1.ID {
+		t.Fatalf("队首应为 b1(%s)，实际 %+v", b1.ID, oldest)
+	}
+	second, ok := o2.OldestExcept(func(id string) bool { return id == b1.ID })
+	if !ok || second.ID != b2.ID {
+		t.Fatalf("第二批应为 b2(%s)，实际 %+v", b2.ID, second)
+	}
+}
+

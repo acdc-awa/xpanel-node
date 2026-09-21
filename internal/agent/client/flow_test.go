@@ -1,9 +1,16 @@
 package client
 
 import (
+	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+
+	statsService "github.com/xtls/xray-core/app/stats/command"
+	"google.golang.org/grpc"
 
 	"github.com/acdc-awa/xpanel-node/internal/agent/outbox"
 	"github.com/acdc-awa/xpanel-node/internal/agent/stats"
@@ -188,3 +195,139 @@ func TestCycleForInboundDimensionIsZero(t *testing.T) {
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
+
+type fakeStatsServer struct {
+	statsService.UnimplementedStatsServiceServer
+	mu    sync.Mutex
+	stats []*statsService.Stat
+	err   error
+}
+
+func (f *fakeStatsServer) QueryStats(_ context.Context, _ *statsService.QueryStatsRequest) (*statsService.QueryStatsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &statsService.QueryStatsResponse{Stat: f.stats}, nil
+}
+
+func (f *fakeStatsServer) GetUsersStats(_ context.Context, _ *statsService.GetUsersStatsRequest) (*statsService.GetUsersStatsResponse, error) {
+	return &statsService.GetUsersStatsResponse{}, nil
+}
+
+func startFakeStatsServer(t *testing.T, f *fakeStatsServer) string {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer()
+	statsService.RegisterStatsServiceServer(srv, f)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return lis.Addr().String()
+}
+
+// TestSealCycle 验证账期切换封账：
+// 1. Stats 为 nil 时安全无操作
+// 2. 正常情况下，在 applyCycles 之前调用 sealCycle 会立即采集，增量打上旧 CycleID 标签；
+//    applyCycles 之后采集的增量打上新 CycleID 标签
+// 3. Stats 采集失败时，优雅忽略且不影响状态
+func TestSealCycle(t *testing.T) {
+	// 1. Stats 为 nil 时调用不 panic
+	cNil := newFlowClient(t)
+	cNil.sealCycle([]string{"u1.i1@panel.local"})
+
+	// 2. 真实采集封账测试
+	fake := &fakeStatsServer{}
+	addr := startFakeStatsServer(t, fake)
+
+	c := newFlowClient(t)
+	c.Stats = stats.New(addr)
+	t.Cleanup(func() {
+		c.Stats.Close()
+	})
+
+	const email = "u1.i1@panel.local"
+	// 设置用户初始账期 100
+	c.applyCycles(map[string][]protocol.User{"in-a": {{Email: email, CycleID: 100}}})
+
+	// 初始基线采集：Counter 为 1000（建立 baseline，不产出 delta）
+	fake.mu.Lock()
+	fake.stats = []*statsService.Stat{
+		{Name: "user>>>" + email + ">>>traffic>>>uplink", Value: 1000},
+	}
+	fake.mu.Unlock()
+
+	entries, err := c.Stats.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("建立基线失败: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("基线建立时不应产出增量，实际 %d 条", len(entries))
+	}
+
+	// 产生流量（Counter 升至 1500，增量 500），此时收到账期切换（主控下发新账期 200）
+	fake.mu.Lock()
+	fake.stats = []*statsService.Stat{
+		{Name: "user>>>" + email + ">>>traffic>>>uplink", Value: 1500},
+	}
+	fake.mu.Unlock()
+
+	newUsers := map[string][]protocol.User{"in-a": {{Email: email, CycleID: 200}}}
+	changed := c.cycleChanges(newUsers)
+	if len(changed) != 1 {
+		t.Fatalf("应检出 1 个账期变化，实际 %v", changed)
+	}
+
+	// 封账：applyCycles 之前调用 sealCycle
+	c.sealCycle(changed)
+
+	// 验证：此时 pending 中必须有旧账期 100 的增量 500
+	c.pendingMu.Lock()
+	kOld := trafficKey{email: email, cycleID: 100}
+	if p, ok := c.pending[kOld]; !ok || p.Up != 500 {
+		t.Fatalf("旧账期封账数据不正确: ok=%v, pending=%+v", ok, c.pending)
+	}
+	c.pendingMu.Unlock()
+
+	// 封账后应用新账期
+	c.applyCycles(newUsers)
+	if got := c.cycleFor(email); got != 200 {
+		t.Fatalf("applyCycles 后账期应为 200，实际 %d", got)
+	}
+
+	// 新账期下再次产生流量（Counter 升至 1800，增量 300）
+	fake.mu.Lock()
+	fake.stats = []*statsService.Stat{
+		{Name: "user>>>" + email + ">>>traffic>>>uplink", Value: 1800},
+	}
+	fake.mu.Unlock()
+
+	entries2, err := c.Stats.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("新账期采集失败: %v", err)
+	}
+	c.accumulate(entries2)
+
+	// 验证：pending 中同时存在两个账期的条目，分别对应 500 和 300
+	c.pendingMu.Lock()
+	kNew := trafficKey{email: email, cycleID: 200}
+	if p, ok := c.pending[kNew]; !ok || p.Up != 300 {
+		t.Fatalf("新账期数据不正确: ok=%v, pending=%+v", ok, c.pending)
+	}
+	if p, ok := c.pending[kOld]; !ok || p.Up != 500 {
+		t.Fatalf("旧账期数据丢失或被覆盖: ok=%v, pending=%+v", ok, c.pending)
+	}
+	c.pendingMu.Unlock()
+
+	// 3. 测试采集失败时的健壮性
+	fake.mu.Lock()
+	fake.err = errors.New("模拟 gRPC 采集错误")
+	fake.mu.Unlock()
+
+	// 不应 panic，直接返回
+	c.sealCycle([]string{email})
+}
+
