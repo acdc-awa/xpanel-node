@@ -314,17 +314,40 @@ func ReplaceBinary(exePath string, data []byte) error {
 // Apply 完整升级流程：查版本 → 比较 → 下载 → sha256 强制校验 → 原子替换 → 重启。
 // exePath 为目标二进制路径（通常 os.Executable()）；restart 由调用方注入（systemd 重启或手动提示）。
 func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) error {
-	latest, err := f.Latest()
-	if err != nil {
-		return err
+	return ApplyTarget(f, "", false, exePath, restart, out)
+}
+
+// ApplyTarget 带目标版本与强制选项的升级/回滚流程：
+// target 为空时查最新 release；force 为 false 时若当前已 >= 目标版本则拒绝（返回 ErrUpToDate）；
+// force 为 true 时只要版本不完全相同即允许降级回滚。
+func ApplyTarget(f *Fetcher, target string, force bool, exePath string, restart func() error, out io.Writer) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		latest, err := f.Latest()
+		if err != nil {
+			return err
+		}
+		target = latest
 	}
-	if Compare(CurrentVersion(), latest) >= 0 {
-		fmt.Fprintf(out, "已是最新版本 %s（远端: %s）\n", CurrentVersion(), latest)
+
+	curr := CurrentVersion()
+	cmp := Compare(curr, target)
+	if !force && cmp >= 0 {
+		fmt.Fprintf(out, "已是最新版本 %s（远端: %s）\n", curr, target)
 		return ErrUpToDate
 	}
-	fmt.Fprintf(out, "发现新版本 %s（当前 %s），开始升级...\n", latest, CurrentVersion())
+	if force && curr != "dev" && (curr == target || normVersion(curr) == normVersion(target)) {
+		fmt.Fprintf(out, "当前已是版本 %s，无需操作\n", curr)
+		return ErrUpToDate
+	}
 
-	data, wantSum, err := f.Download(latest)
+	action := "升级"
+	if cmp > 0 {
+		action = "回滚"
+	}
+	fmt.Fprintf(out, "开始%s至版本 %s（当前 %s）...\n", action, target, curr)
+
+	data, wantSum, err := f.Download(target)
 	if err != nil {
 		return err
 	}
@@ -340,6 +363,6 @@ func Apply(f *Fetcher, exePath string, restart func() error, out io.Writer) erro
 	if err := restart(); err != nil {
 		return fmt.Errorf("重启失败（新二进制已就位，可手动重启）: %w", err)
 	}
-	fmt.Fprintln(out, "重启完成，升级成功")
+	fmt.Fprintf(out, "重启完成，%s成功\n", action)
 	return nil
 }

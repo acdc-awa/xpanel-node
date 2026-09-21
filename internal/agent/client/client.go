@@ -916,12 +916,12 @@ func (c *Client) handleUpgradeAgent(m *protocol.Message) *protocol.ResultPayload
 	if !c.upgrading.CompareAndSwap(false, true) {
 		return &protocol.ResultPayload{OK: false, Error: "升级正在进行中，请稍候"}
 	}
-	go c.runUpgrade(m.ID, p.Target)
+	go c.runUpgrade(m.ID, p.Target, p.Force)
 	return nil // 回执由 runUpgrade 在版本检查/下载/替换完成后发送
 }
 
 // runUpgrade 后台执行查询 → 下载 → sha256 校验 → 原子替换，随后先发回执再延时触发重启。
-func (c *Client) runUpgrade(reqID, target string) {
+func (c *Client) runUpgrade(reqID, target string, force bool) {
 	defer c.upgrading.Store(false)
 	from := upgrade.CurrentVersion()
 
@@ -942,7 +942,7 @@ func (c *Client) runUpgrade(reqID, target string) {
 		}
 	}
 
-	report("checking", "正在查询最新版本...", "")
+	report("checking", "正在查询目标版本...", "")
 	if target == "" {
 		latest, err := c.Upgrade.Latest()
 		if err != nil {
@@ -953,10 +953,22 @@ func (c *Client) runUpgrade(reqID, target string) {
 		}
 		target = latest
 	}
-	if upgrade.Compare(from, target) >= 0 {
+
+	cmp := upgrade.Compare(from, target)
+	if !force && cmp >= 0 {
 		report("success", fmt.Sprintf("已是最新版本 %s（远端 %s），无需升级", from, target), "")
 		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已是最新版本 %s（远端 %s）", from, target)})
 		return
+	}
+	if force && from != "dev" && (from == target || cmp == 0) {
+		report("success", fmt.Sprintf("当前已是版本 %s，无需操作", from), "")
+		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("当前已是版本 %s，无需操作", from)})
+		return
+	}
+
+	action := "升级"
+	if cmp > 0 {
+		action = "回滚"
 	}
 
 	exe, err := os.Executable()
@@ -991,16 +1003,16 @@ func (c *Client) runUpgrade(reqID, target string) {
 		reply(protocol.ResultPayload{OK: false, Error: errText})
 		return
 	}
-	log.Printf("agent: 二进制已升级 %s → %s（%s）", from, target, exe)
+	log.Printf("agent: 二进制已%s %s → %s（%s）", action, from, target, exe)
 
 	if c.SelfRestart == nil {
-		report("success", fmt.Sprintf("已升级 %s → %s（手动模式，请手动重启 agent）", from, target), "")
-		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s；当前为手动运行模式，请手动重启 agent 进程加载新版本", from, target)})
+		report("success", fmt.Sprintf("已%s %s → %s（手动模式，请手动重启 agent）", action, from, target), "")
+		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已%s %s → %s；当前为手动运行模式，请手动重启 agent 进程加载新版本", action, from, target)})
 		return
 	}
 
-	report("restarting", fmt.Sprintf("已升级 %s → %s，服务器正在重启…", from, target), "")
-	reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已升级 %s → %s，服务器正在重启", from, target)})
+	report("restarting", fmt.Sprintf("已%s %s → %s，服务器正在重启…", action, from, target), "")
+	reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已%s %s → %s，服务器正在重启", action, from, target)})
 	// 回执已写出：延时 1 秒确保 TCP 缓冲区将回执刷至主控，再触发 systemctl restart 杀掉自己
 	time.Sleep(1 * time.Second)
 	if err := c.SelfRestart(); err != nil {

@@ -173,9 +173,10 @@ type InternalUUIDReportPayload struct {
 	UUID string `json:"uuid"`
 }
 
-// UpgradeAgentPayload 主控→节点：升级 agent 二进制。Target 为空 = 拉取最新 release。
+// UpgradeAgentPayload 主控→节点：升级/回滚 agent 二进制。Target 为空 = 拉取最新 release；Force 为 true = 忽略版本高低强制覆盖（回滚）。
 type UpgradeAgentPayload struct {
 	Target string `json:"target,omitempty"`
+	Force  bool   `json:"force,omitempty"`
 }
 
 // UpgradeProgressPayload 节点→主控：升级进度上报。

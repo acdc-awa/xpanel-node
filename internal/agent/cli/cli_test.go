@@ -21,7 +21,7 @@ func TestHelpListsAllCommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("help exit code = %d, want 0", code)
 	}
-	for _, c := range []string{"run", "status", "restart", "logs", "uninstall", "help"} {
+	for _, c := range []string{"run", "status", "restart", "logs", "uninstall", "upgrade", "rollback", "help"} {
 		if !strings.Contains(out, c) {
 			t.Errorf("help 输出未包含子命令 %q", c)
 		}
@@ -50,6 +50,24 @@ func TestHelpSubcommand(t *testing.T) {
 	}
 	if !strings.Contains(out, "用法") {
 		t.Error("help logs 输出缺少用法说明")
+	}
+
+	code, out, _ = run(t, "help", "rollback")
+	if code != 0 {
+		t.Fatalf("help rollback exit code = %d, want 0", code)
+	}
+	if !strings.Contains(out, "xray-agent rollback") || !strings.Contains(out, "回滚") {
+		t.Errorf("help rollback 输出不符合预期: %s", out)
+	}
+}
+
+func TestRollbackMissingTargetVersion(t *testing.T) {
+	code, _, errOut := run(t, "rollback")
+	if code != 2 {
+		t.Fatalf("rollback 缺少参数 exit code = %d, want 2", code)
+	}
+	if !strings.Contains(errOut, "缺少目标版本号") {
+		t.Errorf("errOut 应提示缺少目标版本号，实际: %s", errOut)
 	}
 }
 

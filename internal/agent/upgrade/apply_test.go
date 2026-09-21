@@ -75,3 +75,77 @@ func TestApplyShaMismatchRejects(t *testing.T) {
 		t.Error("临时文件未清理: xray-agent.tmp 仍存在")
 	}
 }
+
+func TestApplyRollbackBinary(t *testing.T) {
+	oldVer := Version
+	Version = "v9.9.9"
+	defer func() { Version = oldVer }()
+
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "xray-agent")
+	if err := os.WriteFile(exePath, []byte("v9-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, f := newFakeGitHub(t, fakeRelease{Tag: "v1.0.0", Data: []byte("v1-binary")})
+
+	restarted := false
+	var out bytes.Buffer
+	err := ApplyTarget(f, "v1.0.0", true, exePath, func() error { restarted = true; return nil }, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(exePath)
+	if string(got) != "v1-binary" {
+		t.Errorf("回滚替换后内容 = %q", got)
+	}
+	if !restarted {
+		t.Error("未调用 restart")
+	}
+	if !strings.Contains(out.String(), "回滚") || !strings.Contains(out.String(), "v1.0.0") {
+		t.Errorf("输出应含回滚与旧版本号: %q", out.String())
+	}
+}
+
+func TestApplyRollbackSameVersionNoop(t *testing.T) {
+	oldVer := Version
+	Version = "v1.0.0"
+	defer func() { Version = oldVer }()
+
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "xray-agent")
+	if err := os.WriteFile(exePath, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, f := newFakeGitHub(t, fakeRelease{Tag: "v1.0.0", Data: []byte("x")})
+
+	err := ApplyTarget(f, "v1.0.0", true, exePath, func() error { t.Error("不应重启"); return nil }, &bytes.Buffer{})
+	if !errors.Is(err, ErrUpToDate) {
+		t.Fatalf("err = %v, want ErrUpToDate", err)
+	}
+	got, _ := os.ReadFile(exePath)
+	if string(got) != "old" {
+		t.Error("版本相同不应替换")
+	}
+}
+
+func TestApplyTargetDowngradeWithoutForceRejects(t *testing.T) {
+	oldVer := Version
+	Version = "v9.9.9"
+	defer func() { Version = oldVer }()
+
+	dir := t.TempDir()
+	exePath := filepath.Join(dir, "xray-agent")
+	if err := os.WriteFile(exePath, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, f := newFakeGitHub(t, fakeRelease{Tag: "v1.0.0", Data: []byte("x")})
+
+	err := ApplyTarget(f, "v1.0.0", false, exePath, func() error { t.Error("不应重启"); return nil }, &bytes.Buffer{})
+	if !errors.Is(err, ErrUpToDate) {
+		t.Fatalf("err = %v, want ErrUpToDate", err)
+	}
+	got, _ := os.ReadFile(exePath)
+	if string(got) != "old" {
+		t.Error("未开启 force 时降级应被拒绝")
+	}
+}

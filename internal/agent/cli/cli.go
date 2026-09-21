@@ -26,6 +26,7 @@ var commands = map[string]string{
 	"logs":      "查看日志（systemd: journalctl；手动: xray 日志文件）",
 	"uninstall": "卸载 agent（含 xray-core 与 geo 数据）",
 	"upgrade":   "升级 agent 到主控最新版本（--check 仅检查）",
+	"rollback":  "回滚 agent 到指定版本（下载 → sha256 校验 → 原子替换 → 重启）",
 	"help":      "显示帮助或命令详情",
 }
 
@@ -78,6 +79,8 @@ func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runUninstall(rest, stdin, stdout, stderr)
 	case "upgrade":
 		return runUpgrade(rest, stdout, stderr)
+	case "rollback":
+		return runRollback(rest, stdout, stderr)
 	case "run":
 		fmt.Fprintln(stderr, "run 子命令请直接使用 xray-agent 启动（或省略 run）")
 		return 2
@@ -117,7 +120,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  xray-agent <命令> [选项]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "命令:")
-	for _, c := range []string{"status", "restart", "logs", "uninstall", "upgrade", "help"} {
+	for _, c := range []string{"status", "restart", "logs", "uninstall", "upgrade", "rollback", "help"} {
 		fmt.Fprintf(w, "  %-10s %s\n", c, commands[c])
 	}
 	fmt.Fprintln(w)
@@ -144,6 +147,10 @@ func printCmdHelp(cmd string, w io.Writer) {
 	case "upgrade":
 		fmt.Fprintln(w, "xray-agent upgrade - 升级 agent 到主控最新版本（下载 → sha256 校验 → 原子替换 → 重启）")
 		fmt.Fprintln(w, "用法: xray-agent upgrade [--check] [-config <path>]")
+	case "rollback":
+		fmt.Fprintln(w, "xray-agent rollback - 回滚 agent 到指定版本（下载 → sha256 校验 → 原子替换 → 重启）")
+		fmt.Fprintln(w, "用法: xray-agent rollback [-config <path>] <版本号>")
+		fmt.Fprintln(w, "示例: xray-agent rollback v0.1.15")
 	case "help":
 		fmt.Fprintln(w, "xray-agent help - 显示帮助或命令详情")
 		fmt.Fprintln(w, "用法: xray-agent help [命令]")
@@ -467,6 +474,58 @@ func runUpgrade(rest []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		fmt.Fprintln(stderr, "升级失败:", err)
+		return 1
+	}
+	return 0
+}
+
+// ---------- rollback ----------
+
+func runRollback(rest []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("rollback")
+	cfgPath := fs.String("config", "", "配置文件路径")
+	if err := fs.Parse(rest); err != nil {
+		fmt.Fprintf(stderr, "参数错误: %v\n", err)
+		return 2
+	}
+	args := fs.Args()
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "缺少目标版本号（用法: xray-agent rollback [-config <path>] <版本号>）")
+		return 2
+	}
+	target := strings.TrimSpace(args[0])
+	if target == "" {
+		fmt.Fprintln(stderr, "目标版本号不能为空")
+		return 2
+	}
+	if !strings.HasPrefix(target, "v") {
+		target = "v" + target
+	}
+	path := resolveConfigPath(*cfgPath)
+	cfg, err := loadTolerant(path)
+	if err != nil {
+		fmt.Fprintln(stderr, "rollback 失败:", err)
+		return 1
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(stderr, "获取自身路径失败:", err)
+		return 1
+	}
+	f := &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror, DownloadTimeout: cfg.Update.DownloadTimeout}
+	restart := func() error {
+		if IsSystemdManaged() {
+			return runCmdErr("systemctl", "restart", "xray-agent")
+		}
+		fmt.Fprintln(stdout, "手动模式：请手动重启 agent（systemctl restart xray-agent 或重新运行）")
+		return nil
+	}
+	if err := upgrade.ApplyTarget(f, target, true, exe, restart, stdout); err != nil {
+		if errors.Is(err, upgrade.ErrUpToDate) {
+			return 0
+		}
+		fmt.Fprintln(stderr, "回滚失败:", err)
 		return 1
 	}
 	return 0

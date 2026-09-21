@@ -89,17 +89,19 @@ SetupInternalAccountPayload { tag }
 SetupInternalResult         { tag, uuid }          // uuid 由节点生成，主控以此覆盖 DB
 PushCertPayload    { domain, cert_pem, key_pem }
 InternalUUIDReportPayload { tag, uuid }
-UpgradeAgentPayload { target? }              // 空 = 拉取最新 release
+UpgradeAgentPayload { target?, force? }       // target: 空 = 拉取最新 release; force: 强制安装/允许旧版本回滚
 UpgradeProgressPayload { phase, target?, message, error?, ts }
                      // phase: starting/checking/downloading/verifying/replacing/restarting/failed/success
 AgentSettingsPayload { report_interval_sec?, heartbeat_interval_sec? }
                     // 秒；0=不变；clamp 5s–30min；仅当前会话生效（不写回 agent.yaml）
 ResultPayload      { ok, error?, data? }
 StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at?,
-                     xray_state?, xray_last_error?, xray_restart_failures? }
+                     xray_state?, xray_last_error?, xray_restart_failures?,
+                     disk_hash?, running_hash? }
                      // xray_state: running / restarting / failed / stopped（2026-09-21 新增）
                      // failed = 连续启动失败达上限、已停止自动拉起（等慢探底自愈或面板「重启 Xray」）
                      // started_at 缺省 = 未托管实例（上一轮 agent 遗留、本轮未 spawn 过），此时 uptime_sec 为 0
+                     // disk_hash: 磁盘配置文件 SHA-256; running_hash: 运行中实例生效配置 SHA-256
 ```
 
 ## 5. 时序
