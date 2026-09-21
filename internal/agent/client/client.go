@@ -671,6 +671,9 @@ func (c *Client) sendHeartbeat() error {
 		if !h.ErrorAt.IsZero() {
 			hb.XrayErrorAt = h.ErrorAt.Unix()
 		}
+		// 配置对账：主控拿 running_hash 判断节点跑的是不是它以为的那份配置，
+		// 拿 disk_hash 判断磁盘是否与它记录的一致（热更落盘会改 disk 不改 running）。
+		hb.DiskHash, hb.RunningHash = c.Xray.Hashes()
 	}
 	return c.send(protocol.MsgHeartbeat, "", hb)
 }
@@ -789,9 +792,8 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		if err := c.Xray.RestartWithConfig(p.ConfigJSON); err != nil {
 			return &protocol.ResultPayload{OK: false, Error: err.Error()}
 		}
-		if c.Stats != nil {
-			c.Stats.ResetUsers()
-		}
+		// 用户缓存不在这里重置：xray 已按新配置启动，重建缓存的钩子挂在 Proc.OnStarted 上
+		// （冷更、回滚、自愈、探底、手动重启五条路径一次覆盖，见 stats.SeedUsers）。
 		return &protocol.ResultPayload{OK: true, Data: "xray 已按新配置重启"}
 	case protocol.MsgSyncUsers:
 		var p protocol.SyncUsersPayload
@@ -810,6 +812,16 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		c.applyCycles(p.Users)
 		if err := c.Stats.SyncUsers(context.Background(), p.Users); err != nil {
 			return &protocol.ResultPayload{OK: false, Error: err.Error()}
+		}
+		// 热更顺带落盘（不变量 I2）：磁盘必须等于运行中配置的快照，否则节点重启
+		// （自愈 / 开机 / 手动重启）会把用户集回退到上一次冷更。
+		// 顺序不可颠倒：先热更（gRPC）后落盘——-test 比 gRPC 严格，先落盘会把
+		// "热更得过、-test 不过"的内容留在磁盘上，节点一重启就起不来。
+		// 落盘失败如实回执（OK=false）：用户已同步但磁盘没跟上，主控应当知道并能重试。
+		if p.ConfigJSON != "" && c.Xray != nil {
+			if err := c.Xray.WriteConfigIfValid(p.ConfigJSON); err != nil {
+				return &protocol.ResultPayload{OK: false, Error: "用户已同步，但配置落盘失败: " + err.Error()}
+			}
 		}
 		return &protocol.ResultPayload{OK: true, Data: "用户列表同步成功（gRPC 动态调整）"}
 	case protocol.MsgTrafficAck:
@@ -848,9 +860,7 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		if err := c.Xray.Start(); err != nil {
 			return &protocol.ResultPayload{OK: false, Error: err.Error()}
 		}
-		if c.Stats != nil {
-			c.Stats.ResetUsers()
-		}
+		// 用户缓存同样由 Proc.OnStarted 重建（见 MsgPushConfig 分支）
 		return &protocol.ResultPayload{OK: true, Data: "xray 已重启"}
 	case protocol.MsgGetStatus:
 		running, pid, startedAt, uptime := c.Xray.Status()
@@ -867,6 +877,7 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		}
 		h := c.Xray.Health()
 		sd.XrayState, sd.XrayLastError, sd.XrayFailures = h.State, h.LastError, h.Failures
+		sd.DiskHash, sd.RunningHash = c.Xray.Hashes()
 		return &protocol.ResultPayload{OK: true, Data: sd}
 	case protocol.MsgGetLogs:
 		var p protocol.GetLogsPayload

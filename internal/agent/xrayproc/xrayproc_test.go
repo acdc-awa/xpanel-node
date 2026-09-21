@@ -133,12 +133,13 @@ func killFake(t *testing.T, p *Proc, regPath string) {
 // shortTiming 把时序参数压到毫秒级，避免用例等真实退避（用例结束恢复）。
 func shortTiming(t *testing.T) {
 	t.Helper()
-	ow, orb, orm := watchdogInterval, readyWindow, backoffMax
+	ow, orb, orm, osg := watchdogInterval, readyWindow, backoffMax, startFailureGrace
 	opi, orc := probeInterval, rejectCooldown
 	watchdogInterval, readyWindow, backoffMax = 20*time.Millisecond, 60*time.Millisecond, 5*time.Millisecond
 	probeInterval, rejectCooldown = 5*time.Millisecond, 5*time.Millisecond
+	startFailureGrace = 30 * time.Millisecond
 	t.Cleanup(func() {
-		watchdogInterval, readyWindow, backoffMax = ow, orb, orm
+		watchdogInterval, readyWindow, backoffMax, startFailureGrace = ow, orb, orm, osg
 		probeInterval, rejectCooldown = opi, orc
 	})
 }

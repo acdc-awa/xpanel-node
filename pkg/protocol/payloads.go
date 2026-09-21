@@ -30,6 +30,12 @@ type HeartbeatPayload struct {
 	XrayLastError string `json:"xray_last_error,omitempty"`       // 最近一次启动失败原因（已截断）
 	XrayErrorAt   int64  `json:"xray_error_at,omitempty"`         // 该原因的观测时刻（unix 秒）
 	XrayFailures  int    `json:"xray_restart_failures,omitempty"` // 连续启动失败次数
+	// 配置对账（2026-09-21，旧主控忽略未知字段）：DiskHash = 磁盘配置内容哈希；
+	// RunningHash = 本进程最后一次成功启动时那份配置的哈希（xray 只在启动时读一次配置，
+	// 热更落盘只改磁盘、不改这个值）。主控拿 RunningHash 判断节点跑的是不是它以为的配置，
+	// 拿 DiskHash 判断磁盘是否与它记录的一致。
+	DiskHash    string `json:"disk_hash,omitempty"`
+	RunningHash string `json:"running_hash,omitempty"`
 }
 
 // OnlineUserIPs 单个用户当前活跃连接的去重源 IP（refcount 快照，连接断开即移除；
@@ -121,6 +127,14 @@ type User struct {
 // SyncUsersPayload 全量用户同步负载（InboundTag -> []User）。
 type SyncUsersPayload struct {
 	Users map[string][]User `json:"users"`
+	// ConfigJSON 可选：主控在节点处于「无待生效结构」时附带一份完整配置（= 运行中结构的
+	// 快照 + 本帧用户集），节点在 gRPC 热更成功后把它落盘，让磁盘与运行中的用户集保持一致
+	// （不变量 I2），节点重启不会把用户集回退到上一次冷更。
+	//
+	// 老 agent 忽略未知字段 ⇒ 自动退化成「只热更不落盘」，与旧行为一致，无需能力协商。
+	// 顺序约定：节点必须先热更后落盘——-test 比 gRPC 严格，先落盘会把「热更得过、-test
+	// 不过」的内容留在磁盘上，节点一重启就起不来。
+	ConfigJSON string `json:"config_json,omitempty"`
 }
 
 // PushConfigPayload 下发 Xray 配置（P1 为完整 config JSON 透传，
@@ -201,4 +215,10 @@ type StatusData struct {
 	XrayState     string `json:"xray_state,omitempty"`
 	XrayLastError string `json:"xray_last_error,omitempty"`
 	XrayFailures  int    `json:"xray_restart_failures,omitempty"`
+	// 配置对账（2026-09-21，旧主控忽略未知字段）：DiskHash = 磁盘上配置内容的 SHA-256；
+	// RunningHash = 本进程最后一次成功启动时那份配置的 SHA-256。两者不一致 = 磁盘被改过
+	// 但没重启（xray 只在启动时读一次配置，运行中改盘上文件对它零影响）；主控再拿
+	// RunningHash 与它记录的已生效内容比对，即可判断节点跑的是不是它以为的那份配置。
+	DiskHash    string `json:"disk_hash,omitempty"`
+	RunningHash string `json:"running_hash,omitempty"`
 }

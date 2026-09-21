@@ -87,6 +87,18 @@ func main() {
 		log.Printf("xray-agent: %s", note)
 	}
 
+	// 用户缓存按磁盘配置重建（不变量 I5）——缓存是「移除用户」的唯一依据，而 xray 每次从
+	// 磁盘配置启动（冷更 / 回滚 / 自愈 / 慢探底 / 手动重启）都会换掉自己的用户集。
+	// 旧实现只把缓存清空：紧随其后的第一次同步一个都摘不掉，且添加分支会把 payload 回填进
+	// 缓存，分歧从此对后续同步永久不可见（被删 / 被封 / 超量 / 过期的用户最长 1h 仍可用，
+	// 而主控认为同步成功）。钩子挂在 Start 成功之后，五条路径一次覆盖。
+	statsCollector := stats.New(cfg.Stats.APIAddr)
+	proc.OnStarted = func(configPath string) {
+		if err := statsCollector.SeedUsersFromFile(configPath); err != nil {
+			log.Printf("xray-agent: 按配置重建用户缓存失败（沿用旧视图）: %v", err)
+		}
+	}
+
 	// 启动时若已有配置则拉起 xray（崩溃由 watchdog 保持）。
 	// Start 现在要求"spawn 成功且活过就绪窗口"才算起来，失败会把退出码与 xray 自身的
 	// stderr 摘要写进日志（旧实现只说"xray 已启动"，秒死也照说不误）。
@@ -98,7 +110,11 @@ func main() {
 		}
 	}
 
-	statsCollector := stats.New(cfg.Stats.APIAddr)
+	// 开机兜底：xray 可能在本进程接管之前就已在跑（自升级重启时 Start 早退、不触发回调），
+	// 此时磁盘上的配置就是它加载的那份，按它重建缓存即可（重复重建无副作用）。
+	if err := statsCollector.SeedUsersFromFile(cfg.Xray.ConfigPath); err != nil {
+		log.Printf("xray-agent: 开机重建用户缓存失败（沿用旧视图）: %v", err)
+	}
 
 	// 面板触发自升级的重启回调：仅 systemd 服务内启动时可自重启（systemctl restart
 	// 会 SIGTERM 本进程，服务重启拉起新二进制）；手动运行时无重启手段，升级回执里提示手动。
@@ -126,11 +142,11 @@ func main() {
 		SelfRestart:     selfRestart,
 	}
 
-	// Watchdog 崩溃自愈回调：Xray 崩溃拉起后清空内存中的用户列表并触发向主控重连，
-	// 主控重连握手成功后会自动全量下发 sync_users 补齐全部用户（防静态配置用户丢失）。
+	// Watchdog 崩溃自愈回调：xray 被拉起后触发向主控重连，重连握手成功后主控会自动全量
+	// 下发 sync_users 补齐全部用户（兜底：缓存的权威重建已由 OnStarted 按磁盘配置完成，
+	// 这里不再清空缓存——清空正是"冷更后摘不掉用户"那个 bug 的成因）。
 	proc.OnRestart = func() {
-		log.Println("xray-agent: 检测到 xray 异常拉起，重置内存用户列表并触发重连向主控同步")
-		statsCollector.ResetUsers()
+		log.Println("xray-agent: 检测到 xray 异常拉起，触发重连向主控同步")
 		cli.TriggerReconnect()
 	}
 	// 放弃自动拉起时立刻推一帧心跳：主控/面板立即拿到失败原因（报警），不必等下一个周期。

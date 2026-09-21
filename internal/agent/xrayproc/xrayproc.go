@@ -33,10 +33,6 @@ import (
 )
 
 const (
-	// 进程存活时间短于该阈值才计入「连续启动失败」（拉起失败）；跑了一阵才崩的算新的
-	// 独立故障，重新计 1 次，避免把长期运行中的偶发崩溃累积成"放弃拉起"。
-	startFailureGrace = 60 * time.Second
-
 	// maxStartFailures 连续启动失败达到该次数即放弃自动拉起（停止永无止境的重启），
 	// 状态与原因由心跳上报主控报警；面板「重启 Xray」或新的 push_config 会重新给机会。
 	// 取 8 是为了让退避真正走到 backoffMax（见 backoffFor），否则曲线在第 5 次就被截断。
@@ -50,18 +46,25 @@ const (
 )
 
 // 以下为可注入的时序参数（测试用小值替换，避免用例等真实退避）：
+//   - startFailureGrace 进程存活时间短于该阈值才计入「连续启动失败」（拉起失败）；
 //   - watchdogInterval 看门狗巡检周期（兼作"进程已死"的发现延迟）；
 //   - readyWindow spawn 后判定"起来了"的就绪窗口，覆盖 xray 百毫秒级的致命退出；
 //   - backoffBase/backoffMax 连续失败的重试退避区间；
 //   - probeInterval 放弃自动拉起后的慢探底周期；
 //   - rejectCooldown 同一份配置内容应用失败后的重复推送冷却期。
 var (
-	watchdogInterval = 2 * time.Second
-	readyWindow      = 800 * time.Millisecond
-	backoffBase      = 2 * time.Second
-	backoffMax       = 60 * time.Second
-	probeInterval    = 10 * time.Minute
-	rejectCooldown   = 5 * time.Minute
+	startFailureGrace = 60 * time.Second
+	watchdogInterval  = 2 * time.Second
+	readyWindow       = 800 * time.Millisecond
+	backoffBase       = 2 * time.Second
+	backoffMax        = 60 * time.Second
+	probeInterval     = 10 * time.Minute
+	rejectCooldown    = 5 * time.Minute
+	// crashWindow/crashWindowCount：窗口外死亡（跑了一阵才崩）的滑动窗口。这类死亡原本每次
+	// 把连续失败重置为 1，于是「每隔 60s+ 死一次」（如被 OOM 杀）永远到不了上限、永不告警、
+	// 永远以 2s 节奏重启；窗口内累计到阈值即视为故障，与秒死共用同一套计数与放弃通道。
+	crashWindow      = 10 * time.Minute
+	crashWindowCount = 3
 )
 
 // stopGracePeriod SIGTERM 后的优雅退出等待上限。
@@ -104,6 +107,10 @@ type Proc struct {
 	started   bool // 是否曾启动（用于看门狗判定"崩溃后拉起"）
 	startedAt time.Time
 	OnRestart func() // 崩溃后被 Watchdog 成功拉起时的回调
+	// OnStarted xray 按磁盘配置成功启动后的回调（含「已在运行」的早退路径）。
+	// agent 用它按该配置重建用户缓存（不变量 I5）：冷更、回滚、崩溃自愈、慢探底、手动重启
+	// 都会换掉运行中 xray 的用户集，缓存必须跟着换，而不是清空（见 stats.SeedUsers）。
+	OnStarted func(configPath string)
 	// OnGiveUp 连续启动失败达上限、停止自动拉起时的告警回调（agent 用它立刻推一帧心跳，
 	// 让主控/面板马上看到原因，而不是干等下一个心跳周期）。
 	OnGiveUp func(reason string)
@@ -114,7 +121,16 @@ type Proc struct {
 	lastErr      string
 	lastErrAt    time.Time
 	nextTryAt    time.Time
-	giveUpNotice string // 待投递的放弃告警：锁内置位，看门狗锁外取走并回调
+	giveUpNotice string      // 待投递的放弃告警：锁内置位，看门狗锁外取走并回调
+	crashTimes   []time.Time // 窗口外死亡的时刻（滑动窗口，见 crashWindow）
+
+	// 放弃前的一次性 .good 回退（2026-09-21）：回滚原本只存在于 RestartWithConfig 的
+	// Start 失败分支，而"跑了一阵才崩"走不到那里。goodTried 保证每次机会只试一次。
+	goodTried           bool
+	goodRollbackPending bool // 待执行的 .good 回退：锁内置位，看门狗锁外执行
+
+	// runningHash 本进程最后一次成功启动时磁盘上的配置内容哈希（心跳上报主控对账用）。
+	runningHash string
 
 	// 同内容冷却（2026-09-21）：主控每 2 分钟重推一次待推送配置，而"过了 -test 却起不来"
 	// 的配置每应用一次都要先停掉正在服务的 xray 再回滚；同一份内容失败后进入冷却期，
@@ -215,20 +231,48 @@ func (p *Proc) CleanupStale() {
 // stderr 摘要的错误（并计入连续失败计数）。
 func (p *Proc) Start() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.startLocked(false)
+	err := p.startLocked(false)
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	p.notifyStarted()
+	return nil
 }
 
 // startProbe 慢探底：与 Start 同一套启动流程，区别只在失败路径——只更新失败原因与下次
 // 探底时刻，不计入连续失败、不重复投递放弃告警（面板上"连续失败 N 次"停在放弃那一刻）。
 func (p *Proc) startProbe() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.startLocked(true)
+	err := p.startLocked(true)
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	p.notifyStarted()
+	return nil
+}
+
+// notifyStarted 在锁外投递「xray 已按 ConfigPath 起来」。回调会读配置文件并取别的锁
+// （agent 用它重建用户缓存），持锁调用会与 Stop/Start 互等；与放弃告警同样是
+// 「锁内置位、锁外投递」的写法。
+func (p *Proc) notifyStarted() {
+	p.mu.Lock()
+	onStarted, configPath := p.OnStarted, p.ConfigPath
+	p.mu.Unlock()
+	if onStarted != nil {
+		onStarted(configPath)
+	}
 }
 
 func (p *Proc) startLocked(probe bool) error {
 	if p.IsRunning() {
+		p.started = true
+		if p.runningHash == "" {
+			if data, rerr := os.ReadFile(p.ConfigPath); rerr == nil {
+				p.runningHash = contentHash(string(data))
+			}
+		}
 		return nil // 已在运行
 	}
 	if _, err := os.Stat(p.ConfigPath); err != nil {
@@ -281,8 +325,22 @@ func (p *Proc) startLocked(probe bool) error {
 		return fmt.Errorf("xray 启动后立即退出（%s）", p.absorbExitLocked(r, probe))
 	case <-time.After(readyWindow):
 	}
-	// 真正起来了：清零失败态与退避。慢探底成功同样走这里，放弃态随之解除。
-	p.failures, p.gaveUp, p.nextTryAt = 0, false, time.Time{}
+	// 进程活过就绪窗口：清除退避重试时刻
+	p.nextTryAt = time.Time{}
+	if probe {
+		// 慢探底成功：环境已恢复，解除放弃态与失败计数
+		p.failures, p.gaveUp = 0, false
+	} else if !p.startedAt.IsZero() && time.Since(p.startedAt) >= startFailureGrace {
+		// 存活时间已满足稳定运行阈值：清零连续失败与回退标志
+		p.failures, p.gaveUp, p.goodTried = 0, false, false
+	}
+	// 注意：p.crashTimes 为 10 分钟滑动窗口，绝不在就绪窗口结束时清空；
+	// 它按时间自淘汰，或在 ResetFailures 时显式清零。
+	// 记下「本进程启动时磁盘上的内容」：心跳把它与磁盘哈希一起上报，主控据此判断
+	// 节点跑的是不是它以为的那份配置（磁盘被第三方改过时两个哈希会分叉）。
+	if data, rerr := os.ReadFile(p.ConfigPath); rerr == nil {
+		p.runningHash = contentHash(string(data))
+	}
 	return nil
 }
 
@@ -295,6 +353,8 @@ func (p *Proc) Stop() error {
 	if p.run != nil {
 		p.run.manual.Store(true)
 	}
+	// 没有"本进程启动过"的实例了，运行中哈希随之作废（心跳据此区分"停止"与"跑着别的配置"）。
+	p.runningHash = ""
 
 	pid := p.pidFromFile()
 	if pid <= 0 {
@@ -339,10 +399,7 @@ func (p *Proc) RestartWithConfig(configJSON string) error {
 	}
 	// U5（2026-08-14）：先 -test 后落盘——临时文件校验通过才原子替换，
 	// 避免坏配置覆盖磁盘上的好配置（xray 崩溃后 watchdog 用坏配置反复拉起失败，节点永久宕机）。
-	// 临时文件必须以 .json 结尾：xray 配置格式纯按扩展名判定（core/config.go
-	// GetFormatByExtension 仅认 json/jsonc/yaml/yml/toml/pb，无内容嗅探），
-	// 旧命名 .tmp 会让 -test 直接报 "Failed to get format"（实机 pending 悬挂的真正根因）。
-	tmp := strings.TrimSuffix(p.ConfigPath, ".json") + ".apply.json"
+	tmp := p.tmpConfigPath("apply")
 	if err := os.WriteFile(tmp, []byte(configJSON), 0o644); err != nil {
 		return fmt.Errorf("写入临时配置失败: %w", err)
 	}
@@ -380,6 +437,46 @@ func (p *Proc) RestartWithConfig(configJSON string) error {
 	_ = os.Remove(p.ConfigPath + ".bak")
 	_ = copyFile(p.ConfigPath, p.ConfigPath+goodSuffix)
 	p.clearRejected()
+	return nil
+}
+
+// tmpConfigPath 配置的临时写入路径。必须以 .json 结尾：xray 配置格式纯按扩展名判定
+// （core/config.go GetFormatByExtension 仅认 json/jsonc/yaml/yml/toml/pb，无内容嗅探），
+// 旧命名 .tmp 会让 -test 直接报 "Failed to get format"（实机 pending 悬挂的真正根因）。
+func (p *Proc) tmpConfigPath(tag string) string {
+	return strings.TrimSuffix(p.ConfigPath, ".json") + "." + tag + ".json"
+}
+
+// WriteConfigIfValid 只把配置写进磁盘（临时文件 -test 通过后原子替换），**不重启 xray**。
+//
+// 用途：热更（gRPC AlterInbound）之后让磁盘与运行中的用户集保持一致（不变量 I2：磁盘 =
+// 运行中配置的快照）。磁盘是"下次启动的输入"，热更本身不影响运行中的进程，所以这里
+// 绝不能 Stop/Start——它只是把同一份用户集写下去，好让节点重启（自愈 / 开机 / 手动重启）
+// 不会把用户集回退到上一次冷更。
+//
+// 与 RestartWithConfig 的两点刻意差异：
+//  1. 不碰同内容冷却：内容冷却针对的是"整份配置应用失败"，用去拒绝热更会让封禁 / 到期
+//     用户摘不掉（把一个小问题放大成 P1 同类的问题）。这里 -test 不过就直接报错回主控。
+//  2. 不更新 .good：.good 的语义是"最后一次真正启动成功过的配置"，而这份内容还没被启动
+//     验证过（没重启），顶掉它会让开机回退退到一份未经验证的内容。
+func (p *Proc) WriteConfigIfValid(configJSON string) error {
+	if configJSON == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p.ConfigPath), 0o755); err != nil {
+		return err
+	}
+	tmp := p.tmpConfigPath("hot")
+	if err := os.WriteFile(tmp, []byte(configJSON), 0o644); err != nil {
+		return fmt.Errorf("写入临时配置失败: %w", err)
+	}
+	if err := p.TestConfig(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, p.ConfigPath); err != nil {
+		return fmt.Errorf("替换配置失败: %w", err)
+	}
 	return nil
 }
 
@@ -498,6 +595,24 @@ func (p *Proc) check() {
 	p.mu.Unlock()
 
 	if running {
+		p.mu.Lock()
+		if p.failures > 0 && !p.startedAt.IsZero() && time.Since(p.startedAt) >= startFailureGrace {
+			// 进程已稳定运行超过启动宽限期：清零连续启动失败计数与 .good 回退标志
+			p.failures = 0
+			p.gaveUp = false
+			p.goodTried = false
+		}
+		p.mu.Unlock()
+		return
+	}
+	// 达上限且还没试过回退：把磁盘配置换回「上一份真正启动成功过的配置」（.good）再拉一次。
+	// 这一步必须在 Start 之前（否则会先按坏配置白拉一轮），且只做一次。
+	if p.takeGoodRollback() {
+		if p.tryGoodRollback() {
+			p.fireRestart()
+			return
+		}
+		p.dispatchGiveUpNotice() // 回退也失败：立即告警，不等下一拍
 		return
 	}
 	if wait > 0 {
@@ -523,12 +638,86 @@ func (p *Proc) check() {
 	}
 	// 真的拉起来了（普通拉起或慢探底成功）：触发崩溃自愈回调。
 	// 探底成功时 startLocked 已清空 failures/gaveUp/nextTryAt，状态自然回到 running。
+	p.fireRestart()
+}
+
+// fireRestart 投递「xray 被拉起来了」回调（锁外执行，回调会触发重连等外部动作）。
+func (p *Proc) fireRestart() {
 	p.mu.Lock()
 	onRestart := p.OnRestart
 	p.mu.Unlock()
 	if onRestart != nil {
 		go onRestart()
 	}
+}
+
+// takeGoodRollback 取走「该做一次 .good 回退」的标志（锁内置位、锁外执行）。
+func (p *Proc) takeGoodRollback() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pending := p.goodRollbackPending
+	p.goodRollbackPending = false
+	return pending
+}
+
+// tryGoodRollback 放弃自动拉起之前的一次性尝试：把磁盘配置换回「上一份真正启动成功过的
+// 配置」（.good，RestartWithConfig 成功时留的副本）再拉一次。
+//
+// 为什么需要：回滚逻辑原本只存在于 RestartWithConfig 的 Start 失败分支，而「跑了一阵才崩」
+// （就绪窗口之外）与开机拉起根本走不到那里——那类故障里最可能的正是"这份配置本身有问题"，
+// 而它不会自己恢复，只能靠这一次回退。只试一次（goodTried）：失败即转入放弃 + 报警，
+// 不构成新的死循环；环境类故障（端口被占）回退也救不了，仍由慢探底等环境恢复。
+func (p *Proc) tryGoodRollback() bool {
+	good := p.ConfigPath + goodSuffix
+	data, err := os.ReadFile(good)
+	if err != nil {
+		// 没有可回退的副本：这条路走不通，直接放弃（再从 1 数到 8 只是多挨 8 次）
+		p.markGaveUp(p.failureReason())
+		return false
+	}
+	if err := os.WriteFile(p.ConfigPath, data, 0o644); err != nil {
+		log.Printf("xrayproc: 回退上一份可用配置失败: %v", err)
+		p.markGaveUp(p.failureReason())
+		return false
+	}
+	// 回退后给一次干净的失败预算：这份内容此前真的启动成功过，值得从零重试
+	p.ResetFailures()
+	p.markGoodTried()
+	log.Printf("xrayproc: 连续启动失败达上限，已回退到上一份可用配置（%s）并重试", good)
+	if err := p.Start(); err != nil {
+		reason := fmt.Sprintf("回退到上一份可用配置后仍启动失败: %v", err)
+		log.Printf("xrayproc: %s", reason)
+		p.markGaveUp(reason)
+		return false
+	}
+	return true
+}
+
+// markGoodTried 标记「本次机会已用过 .good 回退」（成功启动或新的机会会清零）。
+func (p *Proc) markGoodTried() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.goodTried = true
+}
+
+// failureReason 最近一次失败原因（空则给一句兜底文案——告警不能是空串）。
+func (p *Proc) failureReason() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.lastErr == "" {
+		return "连续启动失败"
+	}
+	return p.lastErr
+}
+
+// markGaveUp 直接进入放弃态（用于"回退也失败"这种手段已用尽的情形）：从 1 数到 8 只会让
+// 节点多挨 8 次无效拉起，这里直接置到上限并投递告警。
+func (p *Proc) markGaveUp(reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failures = maxStartFailures
+	p.lastErr, p.lastErrAt = reason, time.Now()
+	p.giveUpLocked(reason)
 }
 
 // dispatchGiveUpNotice 取走并投递放弃告警（回调在锁外执行，避免持锁跑外部代码）。
@@ -574,27 +763,55 @@ func (p *Proc) noteFailureLocked(reason string, at time.Time, quick, probe bool)
 
 // noteStartFailureLocked 记一次启动失败：连续计数、原因留档、达上限即放弃自动拉起
 // （此后转入慢探底，见 check）。
-// quick=false 表示进程跑了一阵才崩（新故障，重新计 1 次）。
+// quick=false 表示进程跑了一阵才崩：单次算新故障（重新计 1 次），但同一滑动窗口内
+// 累计到 crashWindowCount 次就不再当偶发——否则"每隔 60s+ 死一次"永远到不了上限。
 func (p *Proc) noteStartFailureLocked(reason string, at time.Time, quick bool) {
 	if quick {
 		p.failures++
 	} else {
-		p.failures = 1
+		p.crashTimes = append(p.crashTimes, at)
+		cut := at.Add(-crashWindow)
+		kept := p.crashTimes[:0]
+		for _, t := range p.crashTimes {
+			if t.After(cut) {
+				kept = append(kept, t)
+			}
+		}
+		p.crashTimes = kept
+		if len(p.crashTimes) >= crashWindowCount {
+			p.failures++
+		} else {
+			p.failures = 1
+		}
 	}
 	p.lastErr = reason
 	p.lastErrAt = at
 	if p.failures >= maxStartFailures {
-		if !p.gaveUp {
-			p.gaveUp = true
-			p.giveUpNotice = p.lastErr
-			log.Printf("xrayproc: xray 连续 %d 次启动失败，已停止自动拉起（最近原因: %s）；"+
-				"此后每 %s 慢探底一次，也可在面板「重启 Xray」或重新下发配置立即重试",
-				p.failures, p.lastErr, probeInterval)
+		if !p.goodTried && !p.gaveUp {
+			// 放弃之前先给"回退到上一份可用配置"一次机会（见 tryGoodRollback）：
+			// 锁内置位，由 check() 在锁外执行（回退要写文件 + Start，不能在锁内做）。
+			p.goodTried, p.goodRollbackPending = true, true
+			p.nextTryAt = time.Time{} // 下一拍立即执行
+			log.Printf("xrayproc: xray 连续 %d 次启动失败，先回退到上一份可用配置再试一次（最近原因: %s）",
+				p.failures, reason)
+			return
 		}
-		p.nextTryAt = time.Now().Add(probeInterval)
+		p.giveUpLocked(reason)
 		return
 	}
 	p.nextTryAt = time.Now().Add(backoffFor(p.failures))
+}
+
+// giveUpLocked 进入放弃态：停自动拉起、留一条待投递的告警、转入慢探底（调用方须持有 p.mu）。
+func (p *Proc) giveUpLocked(reason string) {
+	if !p.gaveUp {
+		p.gaveUp = true
+		p.giveUpNotice = reason
+		log.Printf("xrayproc: xray 连续 %d 次启动失败，已停止自动拉起（最近原因: %s）；"+
+			"此后每 %s 慢探底一次，也可在面板「重启 Xray」或重新下发配置立即重试",
+			p.failures, reason, probeInterval)
+	}
+	p.nextTryAt = time.Now().Add(probeInterval)
 }
 
 // noteProbeFailureLocked 记一次慢探底失败：只更新原因与下次探底时刻，不增连续失败计数、
@@ -612,12 +829,14 @@ func (p *Proc) takeGiveUpNoticeLocked() string {
 	return n
 }
 
-// ResetFailures 清零连续失败、放弃态与同内容冷却（面板「重启 Xray」/ 新配置下发时调用，
-// 重新给机会——包括立刻重试此前被冷却拒绝的那份配置，这正是管理员修好环境后的动作）。
+// ResetFailures 清零连续失败、放弃态、窗口外死亡窗口与同内容冷却（面板「重启 Xray」/
+// 新配置下发时调用，重新给机会——包括立刻重试此前被冷却拒绝的那份配置，这正是管理员
+// 修好环境后的动作）。.good 回退机会一并复位：每次新机会都允许试一次回退。
 func (p *Proc) ResetFailures() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.failures, p.gaveUp, p.nextTryAt = 0, false, time.Time{}
+	p.crashTimes, p.goodTried = nil, false
 	p.clearRejectedLocked()
 }
 
@@ -717,6 +936,19 @@ func (p *Proc) Status() (running bool, pid int, startedAt time.Time, uptimeSec i
 		uptime = int64(time.Since(p.startedAt).Seconds())
 	}
 	return true, p.pidFromFile(), p.startedAt, uptime
+}
+
+// Hashes 返回磁盘配置与「本进程最后一次成功启动时」的配置内容哈希（心跳上报，主控据此
+// 对账：running 与主控记的已生效内容不一致 = 节点跑的不是它以为的那份配置）。
+// running 为空表示当前没有本进程启动过的实例（未托管 / 已停止）。
+func (p *Proc) Hashes() (disk, running string) {
+	if data, err := os.ReadFile(p.ConfigPath); err == nil {
+		disk = contentHash(string(data))
+	}
+	p.mu.Lock()
+	running = p.runningHash
+	p.mu.Unlock()
+	return disk, running
 }
 
 // Logs 读取最近 n 行日志。
