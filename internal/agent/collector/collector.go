@@ -3,6 +3,7 @@
 package collector
 
 import (
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -33,12 +34,89 @@ type Collector struct {
 	prevRx    uint64
 	prevTx    uint64
 	haveNet   bool
+
+	// 1秒级网速高频采样（防止长心跳窗口平均除法稀释瞬时尖峰）
+	stopCh     chan struct{}
+	instRxRate float64 // 最近 1 秒真实瞬时下行速率（字节/秒）
+	instTxRate float64 // 最近 1 秒真实瞬时上行速率（字节/秒）
+	peakRxRate float64 // 两次 Snapshot 之间的 1 秒最高下行峰值
+	peakTxRate float64 // 两次 Snapshot 之间的 1 秒最高上行峰值
+	lastSecRx  uint64
+	lastSecTx  uint64
+	lastSecAt  time.Time
+	haveSec    bool
 }
 
 // New 构造采集器。
-func New() *Collector { return &Collector{} }
+func New() *Collector {
+	c := &Collector{
+		stopCh: make(chan struct{}),
+	}
+	go c.sampleLoop()
+	return c
+}
 
-// Snapshot 采集当前快照（CPU 为自上次调用以来的均值）。
+// Close 停止后台高频采样。
+func (c *Collector) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopCh != nil {
+		select {
+		case <-c.stopCh:
+		default:
+			close(c.stopCh)
+		}
+	}
+}
+
+// sampleLoop 1秒级物理网卡采样循环（只读内存伪文件 /proc/net/dev，开销约 5 微秒）。
+func (c *Collector) sampleLoop() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			rx, tx, ok := netDevInfo()
+			if !ok {
+				continue
+			}
+			c.mu.Lock()
+			now := time.Now()
+			if c.haveSec && !c.lastSecAt.IsZero() {
+				dt := now.Sub(c.lastSecAt).Seconds()
+				if dt > 0 {
+					if rx >= c.lastSecRx {
+						r := float64(rx-c.lastSecRx) / dt
+						c.instRxRate = r
+						if r > c.peakRxRate {
+							c.peakRxRate = r
+						}
+					} else {
+						c.instRxRate = 0
+					}
+					if tx >= c.lastSecTx {
+						r := float64(tx-c.lastSecTx) / dt
+						c.instTxRate = r
+						if r > c.peakTxRate {
+							c.peakTxRate = r
+						}
+					} else {
+						c.instTxRate = 0
+					}
+				}
+			}
+			c.lastSecRx = rx
+			c.lastSecTx = tx
+			c.lastSecAt = now
+			c.haveSec = true
+			c.mu.Unlock()
+		}
+	}
+}
+
+// Snapshot 采集当前快照（CPU 为自上次调用以来的均值，网速结合瞬时/峰值防稀释）。
 func (c *Collector) Snapshot() Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -68,11 +146,21 @@ func (c *Collector) Snapshot() Snapshot {
 		if c.haveNet && !c.prevTime.IsZero() {
 			dt := now.Sub(c.prevTime).Seconds()
 			if dt > 0 {
+				var avgRx, avgTx float64
 				if rx >= c.prevRx {
-					snap.RxRate = float64(rx-c.prevRx) / dt
+					avgRx = float64(rx-c.prevRx) / dt
 				}
 				if tx >= c.prevTx {
-					snap.TxRate = float64(tx-c.prevTx) / dt
+					avgTx = float64(tx-c.prevTx) / dt
+				}
+				// 实时速率优先取瞬时高频值或峰值，避免被心跳大窗口平均除法稀释
+				snap.RxRate = math.Max(avgRx, c.instRxRate)
+				snap.TxRate = math.Max(avgTx, c.instTxRate)
+				if c.peakRxRate > snap.RxRate {
+					snap.RxRate = c.peakRxRate
+				}
+				if c.peakTxRate > snap.TxRate {
+					snap.TxRate = c.peakTxRate
 				}
 			}
 		}
@@ -81,6 +169,10 @@ func (c *Collector) Snapshot() Snapshot {
 		c.prevTime = now
 		c.haveNet = true
 	}
+
+	// 重置窗口峰值，开始下一个心跳周期的峰值跟踪
+	c.peakRxRate = 0
+	c.peakTxRate = 0
 
 	return snap
 }

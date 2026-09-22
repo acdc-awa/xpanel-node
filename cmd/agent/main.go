@@ -124,6 +124,7 @@ func main() {
 		selfRestart = func() error { return exec.Command("systemctl", "restart", "xray-agent").Run() }
 	}
 
+	sysCollector := collector.New()
 	cli := &client.Client{
 		BaseURL:         cfg.Master.URL,
 		NodeID:          cfg.Master.NodeID,
@@ -131,7 +132,7 @@ func main() {
 		Heartbeat:       cfg.Heartbeat,
 		ReconnectMax:    cfg.ReconnectMax,
 		Xray:            proc,
-		Collector:       collector.New(),
+		Collector:       sysCollector,
 		Stats:           statsCollector,
 		CollectInterval: cfg.Stats.CollectInterval,
 		ReportInterval:  cfg.Stats.ReportInterval,
@@ -167,6 +168,7 @@ func main() {
 
 	// 退出清理（同步执行，确保 xray 被优雅停止，不遗留孤儿进程）
 	close(wdStop)
+	sysCollector.Close()
 	statsCollector.Close()
 	_ = proc.Stop()
 	log.Println("xray-agent 已退出")

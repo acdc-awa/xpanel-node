@@ -688,7 +688,7 @@ func (c *Client) TriggerHeartbeat() {
 
 // 运行时设置的合法区间：过小会打爆 WS 与主控落库，过大失去近实时语义。
 const (
-	minSettingsInterval = 5 * time.Second
+	minSettingsInterval = 3 * time.Second
 	maxSettingsInterval = 30 * time.Minute
 )
 

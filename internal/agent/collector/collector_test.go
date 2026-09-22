@@ -24,3 +24,30 @@ docker0: 9999999       0    0    0    0     0          0         0  9999999     
 		t.Errorf("expected tx %d, got %d", expectedTx, tx)
 	}
 }
+
+func TestCollectorLifecycleAndPeakRate(t *testing.T) {
+	c := New()
+	// 验证幂等关闭
+	c.Close()
+	c.Close()
+
+	// 验证 Snapshot 峰值保留与复位逻辑
+	c.mu.Lock()
+	c.peakRxRate = 100 * 1024 * 1024 // 100 MB/s
+	c.peakTxRate = 20 * 1024 * 1024  // 20 MB/s
+	c.mu.Unlock()
+
+	// 直接调用 Snapshot
+	snap := c.Snapshot()
+	// 在 Linux 上若有网卡数据会采入 peak；无论是否有真实网卡，Snapshot 执行后峰值必须复位
+	c.mu.Lock()
+	resetRx := c.peakRxRate
+	resetTx := c.peakTxRate
+	c.mu.Unlock()
+
+	if resetRx != 0 || resetTx != 0 {
+		t.Errorf("Snapshot 后峰值未复位: rx=%v, tx=%v", resetRx, resetTx)
+	}
+	_ = snap
+}
+
