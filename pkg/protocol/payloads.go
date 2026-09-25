@@ -43,6 +43,9 @@ type HeartbeatPayload struct {
 type OnlineUserIPs struct {
 	Email string   `json:"email"`
 	IPs   []string `json:"ips,omitempty"`
+	// IPLastSeen 每个 IP 最近一次建连/增连时刻（unix 秒，xray OnlineMap 的 lastSeen）。
+	// 主控可用于展示「空闲多久」；旧主控忽略未知字段，旧 agent 不发。
+	IPLastSeen map[string]int64 `json:"ip_last_seen,omitempty"`
 }
 
 // TrafficEntry 单条流量记录。两个维度互斥：

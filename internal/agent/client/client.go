@@ -637,13 +637,17 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 // sendHeartbeat 组装并发送一帧心跳（含 xray 健康快照）。
 func (c *Client) sendHeartbeat() error {
 	snap := c.Collector.Snapshot()
+	xrayRunning := c.Xray.IsRunning()
 	onlineUsers := 0
 	var onlineIPs []protocol.OnlineUserIPs
+	// 在线快照在心跳发送前现场拉取：新鲜度与心跳周期严格一致，
+	// 不再经过 collect 循环的缓存（见 stats.Collector.OnlineForHeartbeat）。
 	if c.Stats != nil {
-		onlineUsers = c.Stats.OnlineUsers()
-		for _, u := range c.Stats.OnlineSnapshot() {
-			onlineIPs = append(onlineIPs, protocol.OnlineUserIPs{Email: u.Email, IPs: u.IPs})
+		_, users := c.Stats.OnlineForHeartbeat(xrayRunning)
+		for _, u := range users {
+			onlineIPs = append(onlineIPs, protocol.OnlineUserIPs{Email: u.Email, IPs: u.IPs, IPLastSeen: u.LastSeen})
 		}
+		onlineUsers = len(onlineIPs)
 	}
 	hb := protocol.HeartbeatPayload{
 		CPU:         snap.CPU,
@@ -651,7 +655,7 @@ func (c *Client) sendHeartbeat() error {
 		MemTotal:    snap.MemTotal,
 		Disk:        snap.Disk,
 		DiskTotal:   snap.DiskTotal,
-		XrayRunning: c.Xray.IsRunning(),
+		XrayRunning: xrayRunning,
 		OnlineUsers: onlineUsers,
 		OnlineIPs:   onlineIPs,
 		RxRate:      snap.RxRate,
@@ -687,14 +691,17 @@ func (c *Client) TriggerHeartbeat() {
 }
 
 // 运行时设置的合法区间：过小会打爆 WS 与主控落库，过大失去近实时语义。
+// 心跳与上报下限不同：心跳走主控纯内存路径（0 磁盘 I/O），可放开到 1s；
+// 上报每轮触发 outbox 落盘 + 主控事务写库，3s 已是计费语义下的合理下限。
 const (
-	minSettingsInterval = 3 * time.Second
-	maxSettingsInterval = 30 * time.Minute
+	minHeartbeatInterval = 1 * time.Second
+	minReportInterval    = 3 * time.Second
+	maxSettingsInterval  = 30 * time.Minute
 )
 
-func clampInterval(d time.Duration) time.Duration {
-	if d < minSettingsInterval {
-		return minSettingsInterval
+func clampInterval(d, min time.Duration) time.Duration {
+	if d < min {
+		return min
 	}
 	if d > maxSettingsInterval {
 		return maxSettingsInterval
@@ -738,14 +745,14 @@ func (c *Client) applyAgentSettings(p protocol.AgentSettingsPayload) string {
 	c.settingsMu.Lock()
 	var changed []string
 	if p.ReportIntervalSec > 0 {
-		d := clampInterval(time.Duration(p.ReportIntervalSec) * time.Second)
+		d := clampInterval(time.Duration(p.ReportIntervalSec)*time.Second, minReportInterval)
 		if d != c.rtReport {
 			changed = append(changed, fmt.Sprintf("上报周期→%s", d))
 		}
 		c.rtReport = d
 	}
 	if p.HeartbeatIntervalSec > 0 {
-		d := clampInterval(time.Duration(p.HeartbeatIntervalSec) * time.Second)
+		d := clampInterval(time.Duration(p.HeartbeatIntervalSec)*time.Second, minHeartbeatInterval)
 		if d != c.rtHeartbeat {
 			changed = append(changed, fmt.Sprintf("心跳周期→%s", d))
 		}

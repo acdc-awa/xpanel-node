@@ -49,7 +49,13 @@ var panelUserEmailRe = regexp.MustCompile(`(?i)^u\d+\.i\d+@panel\.local$`)
 type OnlineUser struct {
 	Email string
 	IPs   []string
+	// LastSeen 每个 IP 最近一次建连时刻（unix 秒，透传 xray OnlineMap 的 lastSeen）。
+	LastSeen map[string]int64
 }
+
+// maxOnlineStale 在线快照的最大可信年龄：距上次成功刷新超过该时长（xray 卡死但进程
+// 还在、API 持续无响应）就不再上报残影，宁可显示空也不显示冻结的旧名单。
+const maxOnlineStale = 2 * time.Minute
 
 // Collector 采集 Xray stats 并通过 HandlerService 动态同步用户。
 type Collector struct {
@@ -62,8 +68,8 @@ type Collector struct {
 	last         map[string]int64                    // 计数器名 → 上次累计值
 	baseline     bool                                // 是否已建立基线
 	currentUsers map[string]map[string]protocol.User // inboundTag -> email -> protocol.User
-	online       int                                 // 最近一次 Collect 观测到的在线用户数
-	onlineUsers  []OnlineUser                        // 最近一次 Collect 的在线用户 IP 快照
+	onlineUsers  []OnlineUser                        // 最近一次成功拉取的在线用户 IP 快照
+	onlineAt     time.Time                           // 该快照的成功拉取时刻（防冻结判龄）
 }
 
 // New 构造采集器（apiAddr 如 127.0.0.1:10085）。
@@ -75,18 +81,50 @@ func New(apiAddr string) *Collector {
 	}
 }
 
-// OnlineUsers 返回最近一次 Collect 观测到的在线用户数（未采集过则 0）。
-func (c *Collector) OnlineUsers() int {
+// OnlineForHeartbeat 心跳帧专用的在线快照获取：现场调 GetUsersStats 拉取最新快照，
+// 让在线数据的新鲜度与心跳周期严格一致（不再依赖 collect 循环的缓存节奏）。
+//
+// 容错链：xray 未运行 → 其 OnlineMap 必为空（进程死了 OnlineMap 随进程消失），直接清零返回；
+// RPC 失败 → 沿用上次快照（瞬时抖动不该让在线数闪跳为 0）；但距上次成功刷新超过
+// maxOnlineStale → 返回空快照，防止 xray 卡死期间心跳无限携带冻结的旧名单。
+func (c *Collector) OnlineForHeartbeat(xrayRunning bool) (int, []OnlineUser) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.online
+
+	if !xrayRunning {
+		c.onlineUsers = nil
+		c.onlineAt = time.Time{}
+		return 0, nil
+	}
+
+	if err := c.refreshOnlineLocked(); err != nil {
+		log.Printf("agent: 在线快照刷新失败（沿用上次快照）: %v", err)
+	}
+
+	if !c.onlineAt.IsZero() && time.Since(c.onlineAt) > maxOnlineStale {
+		log.Printf("agent: 在线快照已 %s 未成功刷新，本帧不上报（防冻结残影）", time.Since(c.onlineAt).Round(time.Second))
+		c.onlineUsers = nil
+		return 0, nil
+	}
+	return len(c.onlineUsers), cloneOnlineUsers(c.onlineUsers)
 }
 
-// OnlineSnapshot 返回最近一次 Collect 的在线用户 IP 快照（拷贝；未采集过则 nil）。
-func (c *Collector) OnlineSnapshot() []OnlineUser {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return cloneOnlineUsers(c.onlineUsers)
+// refreshOnlineLocked 拉取一次 GetUsersStats 并更新快照（调用方须持有 mu）。
+func (c *Collector) refreshOnlineLocked() error {
+	if c.client == nil {
+		if err := c.connectLocked(); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resp, err := c.client.GetUsersStats(ctx, &statsService.GetUsersStatsRequest{})
+	if err != nil {
+		return err
+	}
+	c.onlineUsers = onlineUsersFromResp(resp)
+	c.onlineAt = time.Now()
+	return nil
 }
 
 // onlineUsersFromResp 把 GetUsersStats 回复规整为在线快照（过滤空 email/空 IP）。
@@ -97,15 +135,18 @@ func onlineUsersFromResp(resp *statsService.GetUsersStatsResponse) []OnlineUser 
 			continue
 		}
 		ips := make([]string, 0, len(u.GetIps()))
+		lastSeen := make(map[string]int64, len(u.GetIps()))
 		for _, e := range u.GetIps() {
-			if e != nil && e.GetIp() != "" {
-				ips = append(ips, e.GetIp())
+			if e == nil || e.GetIp() == "" {
+				continue
 			}
+			ips = append(ips, e.GetIp())
+			lastSeen[e.GetIp()] = e.GetLastSeen()
 		}
 		if len(ips) == 0 {
 			continue // 服务端已滤掉 Count()==0 的用户，此处防御性再滤
 		}
-		users = append(users, OnlineUser{Email: u.GetEmail(), IPs: ips})
+		users = append(users, OnlineUser{Email: u.GetEmail(), IPs: ips, LastSeen: lastSeen})
 	}
 	return users
 }
@@ -116,7 +157,11 @@ func cloneOnlineUsers(src []OnlineUser) []OnlineUser {
 	}
 	out := make([]OnlineUser, len(src))
 	for i, u := range src {
-		out[i] = OnlineUser{Email: u.Email, IPs: append([]string(nil), u.IPs...)}
+		ls := make(map[string]int64, len(u.LastSeen))
+		for ip, t := range u.LastSeen {
+			ls[ip] = t
+		}
+		out[i] = OnlineUser{Email: u.Email, IPs: append([]string(nil), u.IPs...), LastSeen: ls}
 	}
 	return out
 }
@@ -166,8 +211,8 @@ func (c *Collector) SeedUsers(configJSON []byte) error {
 	defer c.mu.Unlock()
 	c.currentUsers = users
 	// 旧进程的连接随重启全部消失，在线快照一并清零，避免心跳沿用旧进程的残影。
-	c.online = 0
 	c.onlineUsers = nil
+	c.onlineAt = time.Time{}
 	return nil
 }
 
@@ -356,14 +401,6 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 		return nil, err
 	}
 
-	// 在线快照：OnlineMap（user>>><email>>>online）不在 counters 命名空间，
-	// QueryStats 永远不返回它，必须走专用 RPC GetUsersStats。
-	// 失败时沿用上次快照（瞬时抖动不该让心跳在线数闪跳为 0）；xray 进程整体
-	// 掉线时 QueryStats 会先行失败，本函数根本走不到这里。
-	if err := c.collectOnlineLocked(ctx); err != nil {
-		log.Printf("agent: 在线用户采集失败（沿用上次快照）: %v", err)
-	}
-
 	// 先建基线：首次调用只记录当前值，不产出增量（user/inbound 两个计数器族都必须
 	// 入基线，否则首个周期会把节点历史总流量误报为本周期增量）
 	if !c.baseline {
@@ -442,15 +479,4 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 	entries = appendDelta(entries, up, down, false)
 	entries = appendDelta(entries, inUp, inDown, true)
 	return entries, nil
-}
-
-// collectOnlineLocked 通过 GetUsersStats 拉取在线用户快照（调用方须持有 mu）。
-func (c *Collector) collectOnlineLocked(ctx context.Context) error {
-	resp, err := c.client.GetUsersStats(ctx, &statsService.GetUsersStatsRequest{})
-	if err != nil {
-		return err
-	}
-	c.onlineUsers = onlineUsersFromResp(resp)
-	c.online = len(c.onlineUsers)
-	return nil
 }

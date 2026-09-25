@@ -204,10 +204,14 @@ func TestApplyAgentSettings(t *testing.T) {
 		t.Fatalf("effectiveHeartbeat = %s, want 30s（未下发不变）", got)
 	}
 
-	// clamp：过小 → 5s；过大 → 30min
+	// clamp：心跳 1s 恰为新下限放行（主控内存路径 0 磁盘 I/O）；上报过小 → 3s；过大 → 30min
 	c.dispatch(mustMsg(t, protocol.MsgAgentSettings, protocol.AgentSettingsPayload{HeartbeatIntervalSec: 1}))
-	if got := c.effectiveHeartbeat(); got != minSettingsInterval {
-		t.Fatalf("过小心跳应 clamp 到 5s, got %s", got)
+	if got := c.effectiveHeartbeat(); got != minHeartbeatInterval {
+		t.Fatalf("心跳 1s 应放行, got %s", got)
+	}
+	c.dispatch(mustMsg(t, protocol.MsgAgentSettings, protocol.AgentSettingsPayload{ReportIntervalSec: 1}))
+	if got := c.effectiveReport(); got != minReportInterval {
+		t.Fatalf("过小上报应 clamp 到 3s, got %s", got)
 	}
 	c.dispatch(mustMsg(t, protocol.MsgAgentSettings, protocol.AgentSettingsPayload{ReportIntervalSec: 999999}))
 	if got := c.effectiveReport(); got != maxSettingsInterval {
