@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	handlerService "github.com/xtls/xray-core/app/proxyman/command"
@@ -57,6 +58,18 @@ type OnlineUser struct {
 // 还在、API 持续无响应）就不再上报残影，宁可显示空也不显示冻结的旧名单。
 const maxOnlineStale = 2 * time.Minute
 
+// onlineLogIntervalSec 在线拉取失败/超龄日志的限频间隔：xray 停机期间拉取循环按心跳
+// 节拍空转，逐条记日志会刷屏（默认 5s 心跳 × 1h ≈ 720 行），限到 1 分钟一条。
+const onlineLogIntervalSec = 60
+
+// onlineSnapshot 不可变在线快照（写时复制）：后台拉取成功后原子整体发布，一经发布
+// 永不被修改，读者（心跳）可安全持有其切片，免拷贝免锁。与计费大锁 mu 完全解耦——
+// 拉取 RPC 不持任何锁，慢 xray 不再拖住计费采集与用户同步（2026-09-25 重构）。
+type onlineSnapshot struct {
+	users []OnlineUser
+	at    time.Time // 成功拉取时刻；零值 = 从未成功拉取
+}
+
 // Collector 采集 Xray stats 并通过 HandlerService 动态同步用户。
 type Collector struct {
 	apiAddr string
@@ -68,8 +81,16 @@ type Collector struct {
 	last         map[string]int64                    // 计数器名 → 上次累计值
 	baseline     bool                                // 是否已建立基线
 	currentUsers map[string]map[string]protocol.User // inboundTag -> email -> protocol.User
-	onlineUsers  []OnlineUser                        // 最近一次成功拉取的在线用户 IP 快照
-	onlineAt     time.Time                           // 该快照的成功拉取时刻（防冻结判龄）
+
+	// online 在线快照的原子发布点；nil 或 at 零值 = 尚无成功快照。
+	online            atomic.Pointer[onlineSnapshot]
+	lastOnlineFailLog atomic.Int64 // 上次「拉取失败」日志时刻（unix 秒，限频）
+	lastStaleLog      atomic.Int64 // 上次「快照超龄」日志时刻（unix 秒，限频）
+
+	// 在线拉取专用 gRPC 连接：与计费/用户同步的共享连接分离，collectLoop 失败时的
+	// Close() 不影响在线拉取自愈；仅供后台拉取 goroutine 使用，无并发。
+	onlineConn *grpc.ClientConn
+	onlineCli  statsService.StatsServiceClient
 }
 
 // New 构造采集器（apiAddr 如 127.0.0.1:10085）。
@@ -81,50 +102,74 @@ func New(apiAddr string) *Collector {
 	}
 }
 
-// OnlineForHeartbeat 心跳帧专用的在线快照获取：现场调 GetUsersStats 拉取最新快照，
-// 让在线数据的新鲜度与心跳周期严格一致（不再依赖 collect 循环的缓存节奏）。
+// OnlineForHeartbeat 心跳帧的在线快照读取：只读内存，不做任何 gRPC。
+// 快照由后台拉取循环（RefreshOnlineOnce，随心跳周期节拍）持续刷新并原子发布；
+// 心跳读内存 = 零 RPC、零阻塞，xray API 慢不再拖住心跳发送，也不会与计费采集/
+// 用户同步抢 Collector.mu（锁内 gRPC 曾把消息循环最长卡住 8–13s）。
 //
-// 容错链：xray 未运行 → 其 OnlineMap 必为空（进程死了 OnlineMap 随进程消失），直接清零返回；
-// RPC 失败 → 沿用上次快照（瞬时抖动不该让在线数闪跳为 0）；但距上次成功刷新超过
-// maxOnlineStale → 返回空快照，防止 xray 卡死期间心跳无限携带冻结的旧名单。
+// 容错链：xray 未运行 → OnlineMap 随进程消失必为空，发布空快照并直接返回；
+// 无任何成功快照 → 返回空；快照距上次成功刷新超过 maxOnlineStale（xray 卡死、
+// 拉取持续失败）→ 返回空，防止心跳无限携带冻结的旧名单。
+// 返回的切片是已发布不可变快照的一部分，调用方只读、不得修改。
 func (c *Collector) OnlineForHeartbeat(xrayRunning bool) (int, []OnlineUser) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if !xrayRunning {
-		c.onlineUsers = nil
-		c.onlineAt = time.Time{}
+		c.online.Store(&onlineSnapshot{})
 		return 0, nil
 	}
-
-	if err := c.refreshOnlineLocked(); err != nil {
-		log.Printf("agent: 在线快照刷新失败（沿用上次快照）: %v", err)
-	}
-
-	if !c.onlineAt.IsZero() && time.Since(c.onlineAt) > maxOnlineStale {
-		log.Printf("agent: 在线快照已 %s 未成功刷新，本帧不上报（防冻结残影）", time.Since(c.onlineAt).Round(time.Second))
-		c.onlineUsers = nil
+	snap := c.online.Load()
+	if snap == nil || snap.at.IsZero() {
 		return 0, nil
 	}
-	return len(c.onlineUsers), cloneOnlineUsers(c.onlineUsers)
+	if age := time.Since(snap.at); age > maxOnlineStale {
+		if now := time.Now().Unix(); now-c.lastStaleLog.Load() >= onlineLogIntervalSec {
+			c.lastStaleLog.Store(now)
+			log.Printf("agent: 在线快照已 %s 未成功刷新，本帧不上报（防冻结残影）", age.Round(time.Second))
+		}
+		return 0, nil
+	}
+	return len(snap.users), snap.users
 }
 
-// refreshOnlineLocked 拉取一次 GetUsersStats 并更新快照（调用方须持有 mu）。
-func (c *Collector) refreshOnlineLocked() error {
-	if c.client == nil {
-		if err := c.connectLocked(); err != nil {
-			return err
+// RefreshOnlineOnce 拉取一次 GetUsersStats 并原子发布新快照（由后台拉取循环按心跳周期调用）。
+// 成功 → 发布新快照；失败 → 沿用旧快照（瞬时抖动不让在线数闪跳为 0），限频记日志。
+// 只允许单个后台 goroutine 串行调用（专用连接无并发保护）。
+func (c *Collector) RefreshOnlineOnce() {
+	if c.onlineCli == nil {
+		conn, err := grpc.NewClient(c.apiAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			c.logOnlineFail(fmt.Errorf("连接 xray api 失败: %w", err))
+			return
 		}
+		c.onlineConn = conn
+		c.onlineCli = statsService.NewStatsServiceClient(conn)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	resp, err := c.client.GetUsersStats(ctx, &statsService.GetUsersStatsRequest{})
+	resp, err := c.onlineCli.GetUsersStats(ctx, &statsService.GetUsersStatsRequest{})
 	if err != nil {
-		return err
+		c.logOnlineFail(err)
+		return
 	}
-	c.onlineUsers = onlineUsersFromResp(resp)
-	c.onlineAt = time.Now()
-	return nil
+	c.online.Store(&onlineSnapshot{users: onlineUsersFromResp(resp), at: time.Now()})
+}
+
+// logOnlineFail 拉取失败日志（onlineLogIntervalSec 限频防刷屏）。
+func (c *Collector) logOnlineFail(err error) {
+	now := time.Now().Unix()
+	if now-c.lastOnlineFailLog.Load() < onlineLogIntervalSec {
+		return
+	}
+	c.lastOnlineFailLog.Store(now)
+	log.Printf("agent: 在线快照拉取失败（沿用上次快照）: %v", err)
+}
+
+// CloseOnline 关闭在线拉取专用连接（拉取循环退出时调用）。
+func (c *Collector) CloseOnline() {
+	if c.onlineConn != nil {
+		_ = c.onlineConn.Close()
+		c.onlineConn = nil
+		c.onlineCli = nil
+	}
 }
 
 // onlineUsersFromResp 把 GetUsersStats 回复规整为在线快照（过滤空 email/空 IP）。
@@ -149,21 +194,6 @@ func onlineUsersFromResp(resp *statsService.GetUsersStatsResponse) []OnlineUser 
 		users = append(users, OnlineUser{Email: u.GetEmail(), IPs: ips, LastSeen: lastSeen})
 	}
 	return users
-}
-
-func cloneOnlineUsers(src []OnlineUser) []OnlineUser {
-	if len(src) == 0 {
-		return nil
-	}
-	out := make([]OnlineUser, len(src))
-	for i, u := range src {
-		ls := make(map[string]int64, len(u.LastSeen))
-		for ip, t := range u.LastSeen {
-			ls[ip] = t
-		}
-		out[i] = OnlineUser{Email: u.Email, IPs: append([]string(nil), u.IPs...), LastSeen: ls}
-	}
-	return out
 }
 
 // connectLocked 建立 gRPC 连接（调用方须持有 mu）。
@@ -211,8 +241,7 @@ func (c *Collector) SeedUsers(configJSON []byte) error {
 	defer c.mu.Unlock()
 	c.currentUsers = users
 	// 旧进程的连接随重启全部消失，在线快照一并清零，避免心跳沿用旧进程的残影。
-	c.onlineUsers = nil
-	c.onlineAt = time.Time{}
+	c.online.Store(&onlineSnapshot{})
 	return nil
 }
 

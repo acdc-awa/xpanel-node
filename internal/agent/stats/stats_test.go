@@ -54,52 +54,81 @@ func TestOnlineUsersFromResp(t *testing.T) {
 	}
 }
 
-func TestCloneOnlineUsers(t *testing.T) {
-	src := []OnlineUser{{Email: "a@b.c", IPs: []string{"1.1.1.1"}, LastSeen: map[string]int64{"1.1.1.1": 42}}}
-	dst := cloneOnlineUsers(src)
-	dst[0].IPs[0] = "2.2.2.2"
-	dst[0].LastSeen["1.1.1.1"] = 43
-	if src[0].IPs[0] != "1.1.1.1" || src[0].LastSeen["1.1.1.1"] != 42 {
-		t.Errorf("clone 应为深拷贝, src 被改动: %v %v", src[0].IPs, src[0].LastSeen)
-	}
-	if cloneOnlineUsers(nil) != nil {
-		t.Error("clone(nil) 应返回 nil")
-	}
-}
-
-// TestOnlineForHeartbeat 验证心跳取快照的三条容错路径：
-// xray 未运行直接清零；RPC 失败沿用未老化的旧快照；旧快照超龄则不上报（防冻结残影）。
+// TestOnlineForHeartbeat 验证心跳读内存快照的容错路径（2026-09-25 重构后为纯读，零 gRPC）：
+// 无任何成功快照返回空；xray 未运行发布空快照；快照超龄（xray 卡死、拉取持续失败）不上报。
 func TestOnlineForHeartbeat(t *testing.T) {
-	c := New("127.0.0.1:1") // 无 xray，RPC 必失败
 	seed := []OnlineUser{{Email: "u1@panel.local", IPs: []string{"1.2.3.4"}, LastSeen: map[string]int64{"1.2.3.4": 100}}}
 
-	t.Run("xray未运行直接清零", func(t *testing.T) {
-		c.onlineUsers = cloneOnlineUsers(seed)
-		c.onlineAt = time.Now()
+	t.Run("无快照返回空", func(t *testing.T) {
+		c := New("127.0.0.1:1")
+		n, users := c.OnlineForHeartbeat(true)
+		if n != 0 || users != nil {
+			t.Fatalf("无成功快照应返回空, got n=%d users=%v", n, users)
+		}
+	})
+
+	t.Run("xray未运行发布空快照", func(t *testing.T) {
+		c := New("127.0.0.1:1")
+		c.online.Store(&onlineSnapshot{users: cloneForTest(seed), at: time.Now()})
 		n, users := c.OnlineForHeartbeat(false)
 		if n != 0 || users != nil {
 			t.Fatalf("xray 未运行应返回空, got n=%d users=%v", n, users)
 		}
-		if c.onlineUsers != nil || !c.onlineAt.IsZero() {
-			t.Fatalf("内部快照应被清零, users=%v at=%v", c.onlineUsers, c.onlineAt)
+		snap := c.online.Load()
+		if snap == nil || !snap.at.IsZero() || len(snap.users) != 0 {
+			t.Fatalf("内部应发布空快照, got %+v", snap)
 		}
 	})
 
-	t.Run("RPC失败沿用未老化旧快照", func(t *testing.T) {
-		c.onlineUsers = cloneOnlineUsers(seed)
-		c.onlineAt = time.Now().Add(-10 * time.Second) // 未超龄
+	t.Run("未超龄沿用内存快照", func(t *testing.T) {
+		c := New("127.0.0.1:1")
+		c.online.Store(&onlineSnapshot{users: cloneForTest(seed), at: time.Now().Add(-10 * time.Second)})
 		n, users := c.OnlineForHeartbeat(true)
 		if n != 1 || len(users) != 1 || users[0].Email != "u1@panel.local" {
-			t.Fatalf("RPC 失败且未老化应沿用旧快照, got n=%d users=%v", n, users)
+			t.Fatalf("未超龄应返回内存快照, got n=%d users=%v", n, users)
 		}
 	})
 
 	t.Run("超龄快照不上报", func(t *testing.T) {
-		c.onlineUsers = cloneOnlineUsers(seed)
-		c.onlineAt = time.Now().Add(-maxOnlineStale - time.Second)
+		c := New("127.0.0.1:1")
+		c.online.Store(&onlineSnapshot{users: cloneForTest(seed), at: time.Now().Add(-maxOnlineStale - time.Second)})
 		n, users := c.OnlineForHeartbeat(true)
 		if n != 0 || users != nil {
 			t.Fatalf("超龄快照应返回空, got n=%d users=%v", n, users)
 		}
 	})
+}
+
+// TestOnlineSnapshotImmutable 验证已发布快照的免拷贝共享是安全的：读者拿到的切片
+// 与发布点持有的是同一份不可变数据（写时复制，发布后无人修改）。
+func TestOnlineSnapshotImmutable(t *testing.T) {
+	c := New("127.0.0.1:1")
+	seed := []OnlineUser{{Email: "u1@panel.local", IPs: []string{"1.2.3.4"}, LastSeen: map[string]int64{"1.2.3.4": 100}}}
+	c.online.Store(&onlineSnapshot{users: seed, at: time.Now()})
+
+	_, users := c.OnlineForHeartbeat(true)
+	if len(users) != 1 || &users[0] != &seed[0] {
+		t.Fatalf("应返回已发布快照本体（免拷贝）, got %v", users)
+	}
+	// RefreshOnlineOnce 失败（无 xray）时旧快照原样保留
+	c.RefreshOnlineOnce()
+	_, users2 := c.OnlineForHeartbeat(true)
+	if len(users2) != 1 || users2[0].Email != "u1@panel.local" {
+		t.Fatalf("拉取失败应沿用旧快照, got %v", users2)
+	}
+	// CloseOnline 幂等（连接未建立也不得 panic）
+	c.CloseOnline()
+}
+
+// cloneForTest 测试播种用深拷贝（生产路径写时复制，无需克隆）。
+func cloneForTest(src []OnlineUser) []OnlineUser {
+	out := make([]OnlineUser, len(src))
+	for i, u := range src {
+		ls := make(map[string]int64, len(u.LastSeen))
+		for ip, t := range u.LastSeen {
+			ls[ip] = t
+		}
+		out[i] = OnlineUser{Email: u.Email, IPs: append([]string(nil), u.IPs...), LastSeen: ls}
+	}
+	return out
 }

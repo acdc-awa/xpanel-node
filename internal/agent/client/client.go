@@ -99,6 +99,7 @@ type Client struct {
 	reportReset    chan time.Duration
 	heartbeatReset chan time.Duration
 	collectReset   chan time.Duration
+	onlineReset    chan time.Duration
 	// reportKick 立即触发一次上报（建连成功后补发积压、账期切换后尽快送达封账批次）
 	reportKick chan struct{}
 	// heartbeatKick 立即触发一次心跳（xray 放弃自动拉起等告警场景：不等下一个心跳周期，
@@ -128,10 +129,12 @@ func (c *Client) Run(ctx context.Context) {
 	c.reportReset = make(chan time.Duration, 1)
 	c.heartbeatReset = make(chan time.Duration, 1)
 	c.collectReset = make(chan time.Duration, 1)
+	c.onlineReset = make(chan time.Duration, 1)
 	c.reportKick = make(chan struct{}, 1)
 	c.heartbeatKick = make(chan struct{}, 1)
 	go c.collectLoop(ctx)
 	go c.reportLoop(ctx)
+	go c.onlinePullLoop(ctx)
 
 	backoff := time.Second
 	for {
@@ -604,6 +607,34 @@ func (c *Client) sendLocked(typ, id string, payload any) error {
 	return c.ws.WriteMessage(websocket.TextMessage, data)
 }
 
+// onlinePullLoop 在线快照后台拉取：按心跳周期节拍拉取 GetUsersStats 并原子发布到内存，
+// 心跳发送只读内存、不做任何 gRPC（见 stats.Collector.OnlineForHeartbeat）。把最长 3s 的
+// 在线 RPC 从与计费采集/用户同步共用的锁里拆出去——xray API 慢不再拖慢计费采集、
+// 也不再卡住消息循环（2026-09-25 重构，替代"心跳现场拉取"）。
+func (c *Client) onlinePullLoop(ctx context.Context) {
+	if c.Stats == nil {
+		return
+	}
+	defer c.Stats.CloseOnline()
+	ticker := time.NewTicker(c.effectiveHeartbeat())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case d := <-c.onlineReset:
+			ticker.Reset(d)
+			continue
+		case <-ticker.C:
+			// 进程不在时 OnlineMap 必为空，心跳路径会清零，不白拉（避免停机期空转）
+			if c.Xray != nil && !c.Xray.IsRunning() {
+				continue
+			}
+			c.Stats.RefreshOnlineOnce()
+		}
+	}
+}
+
 func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 	ticker := time.NewTicker(c.effectiveHeartbeat())
 	defer ticker.Stop()
@@ -640,8 +671,8 @@ func (c *Client) sendHeartbeat() error {
 	xrayRunning := c.Xray.IsRunning()
 	onlineUsers := 0
 	var onlineIPs []protocol.OnlineUserIPs
-	// 在线快照在心跳发送前现场拉取：新鲜度与心跳周期严格一致，
-	// 不再经过 collect 循环的缓存（见 stats.Collector.OnlineForHeartbeat）。
+	// 在线快照由后台拉取循环按心跳周期刷新进内存，这里只读内存快照（零 RPC、
+	// 零阻塞，与计费采集/用户同步的锁完全解耦，见 stats.Collector.OnlineForHeartbeat）。
 	if c.Stats != nil {
 		_, users := c.Stats.OnlineForHeartbeat(xrayRunning)
 		for _, u := range users {
@@ -774,6 +805,10 @@ func (c *Client) applyAgentSettings(p protocol.AgentSettingsPayload) string {
 	}
 	select {
 	case c.heartbeatReset <- c.effectiveHeartbeat():
+	default:
+	}
+	select {
+	case c.onlineReset <- c.effectiveHeartbeat():
 	default:
 	}
 	return strings.Join(changed, "，")
