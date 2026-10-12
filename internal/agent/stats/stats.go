@@ -77,10 +77,11 @@ type Collector struct {
 	client  statsService.StatsServiceClient
 	handler handlerService.HandlerServiceClient
 
-	mu           sync.Mutex
-	last         map[string]int64                    // 计数器名 → 上次累计值
-	baseline     bool                                // 是否已建立基线
-	currentUsers map[string]map[string]protocol.User // inboundTag -> email -> protocol.User
+	mu               sync.Mutex
+	last             map[string]int64                    // 计数器名 → 上次累计值
+	baseline         bool                                // 是否已建立基线
+	currentUsers     map[string]map[string]protocol.User // inboundTag -> email -> protocol.User
+	inboundProtocols map[string]string                   // inboundTag -> protocol
 
 	// online 在线快照的原子发布点；nil 或 at 零值 = 尚无成功快照。
 	online            atomic.Pointer[onlineSnapshot]
@@ -96,9 +97,10 @@ type Collector struct {
 // New 构造采集器（apiAddr 如 127.0.0.1:10085）。
 func New(apiAddr string) *Collector {
 	return &Collector{
-		apiAddr:      apiAddr,
-		last:         make(map[string]int64),
-		currentUsers: make(map[string]map[string]protocol.User),
+		apiAddr:          apiAddr,
+		last:             make(map[string]int64),
+		currentUsers:     make(map[string]map[string]protocol.User),
+		inboundProtocols: make(map[string]string),
 	}
 }
 
@@ -233,13 +235,14 @@ func (c *Collector) Close() {
 //
 // 解析失败时保留原缓存并返回错误：清空正是要修的那个 bug，宁可沿用旧视图也不能留空。
 func (c *Collector) SeedUsers(configJSON []byte) error {
-	users, err := parseConfigUsers(configJSON)
+	users, protos, err := parseConfigUsers(configJSON)
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.currentUsers = users
+	c.inboundProtocols = protos
 	// 旧进程的连接随重启全部消失，在线快照一并清零，避免心跳沿用旧进程的残影。
 	c.online.Store(&onlineSnapshot{})
 	return nil
@@ -258,6 +261,7 @@ func (c *Collector) SeedUsersFromFile(path string) error {
 type configClientsDoc struct {
 	Inbounds []struct {
 		Tag      string `json:"tag"`
+		Protocol string `json:"protocol"`
 		Settings struct {
 			Clients []struct {
 				ID    string `json:"id"`
@@ -265,21 +269,30 @@ type configClientsDoc struct {
 				Flow  string `json:"flow"`
 				Level uint32 `json:"level"`
 			} `json:"clients"`
+			Users []struct {
+				Auth  string `json:"auth"`
+				Email string `json:"email"`
+				Level uint32 `json:"level"`
+			} `json:"users"`
 		} `json:"settings"`
 	} `json:"inbounds"`
 }
 
-// parseConfigUsers 从配置内容解析出 inboundTag -> email -> 用户。
+// parseConfigUsers 从配置内容解析出 inboundTag -> email -> 用户 以及 tag -> protocol 映射。
 // 只收 panelUserEmailRe 命中的邮箱（relay 内部账户等一律不入缓存）。
-func parseConfigUsers(configJSON []byte) (map[string]map[string]protocol.User, error) {
+func parseConfigUsers(configJSON []byte) (map[string]map[string]protocol.User, map[string]string, error) {
 	var doc configClientsDoc
 	if err := json.Unmarshal(configJSON, &doc); err != nil {
-		return nil, fmt.Errorf("解析配置失败: %w", err)
+		return nil, nil, fmt.Errorf("解析配置失败: %w", err)
 	}
 	users := make(map[string]map[string]protocol.User, len(doc.Inbounds))
+	protos := make(map[string]string, len(doc.Inbounds))
 	for _, inb := range doc.Inbounds {
 		if inb.Tag == "" {
 			continue
+		}
+		if inb.Protocol != "" {
+			protos[inb.Tag] = inb.Protocol
 		}
 		for _, cl := range inb.Settings.Clients {
 			if !panelUserEmailRe.MatchString(cl.Email) {
@@ -292,8 +305,19 @@ func parseConfigUsers(configJSON []byte) (map[string]map[string]protocol.User, e
 			}
 			byEmail[cl.Email] = protocol.User{UUID: cl.ID, Email: cl.Email, Flow: cl.Flow, Level: cl.Level}
 		}
+		for _, u := range inb.Settings.Users {
+			if !panelUserEmailRe.MatchString(u.Email) {
+				continue
+			}
+			byEmail := users[inb.Tag]
+			if byEmail == nil {
+				byEmail = make(map[string]protocol.User)
+				users[inb.Tag] = byEmail
+			}
+			byEmail[u.Email] = protocol.User{UUID: u.Auth, Email: u.Email, Level: u.Level}
+		}
 	}
-	return users, nil
+	return users, protos, nil
 }
 
 // SyncUsers 通过 gRPC HandlerService 增量调整 Xray 中的用户。
@@ -361,11 +385,11 @@ func (c *Collector) SyncUsers(ctx context.Context, targetUsers map[string][]prot
 					})
 				}
 
-				account := &vless.Account{
-					Id:   newUser.UUID,
-					Flow: newUser.Flow,
+				proto := ""
+				if c.inboundProtocols != nil {
+					proto = c.inboundProtocols[tag]
 				}
-				accountTyped := serial.ToTypedMessage(account)
+				accountTyped := buildAccountTyped(proto, newUser)
 
 				protoUser := &xrayProtocol.User{
 					Email:   newUser.Email,
@@ -508,4 +532,17 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 	entries = appendDelta(entries, up, down, false)
 	entries = appendDelta(entries, inUp, inDown, true)
 	return entries, nil
+}
+
+// buildAccountTyped 根据入站协议类型构造 Xray 账号 TypedMessage。
+// 默认与 "vless" 走 VLESS Account；未来新协议（如 hysteria）可在此扩展分支。
+func buildAccountTyped(proto string, u protocol.User) *serial.TypedMessage {
+	switch proto {
+	default:
+		account := &vless.Account{
+			Id:   u.UUID,
+			Flow: u.Flow,
+		}
+		return serial.ToTypedMessage(account)
+	}
 }
