@@ -5,6 +5,8 @@ import (
 	"time"
 
 	statsService "github.com/xtls/xray-core/app/stats/command"
+
+	"github.com/acdc-awa/xpanel-node/pkg/protocol"
 )
 
 func TestInboundCounterRegex(t *testing.T) {
@@ -131,4 +133,23 @@ func cloneForTest(src []OnlineUser) []OnlineUser {
 		out[i] = OnlineUser{Email: u.Email, IPs: append([]string(nil), u.IPs...), LastSeen: ls}
 	}
 	return out
+}
+
+func TestBuildAccountTyped(t *testing.T) {
+	u := protocol.User{
+		UUID: "my-secret-token",
+		Flow: "xtls-rprx-vision",
+	}
+
+	// 1. VLESS (default)
+	msgVless := buildAccountTyped("vless", u)
+	if msgVless == nil || msgVless.Type != "xray.proxy.vless.Account" {
+		t.Fatalf("vless 账号类型错误: %+v", msgVless)
+	}
+
+	// 2. Hysteria
+	msgHy := buildAccountTyped("hysteria", u)
+	if msgHy == nil || msgHy.Type != "xray.proxy.hysteria.account.Account" {
+		t.Fatalf("hysteria 账号类型错误: %+v", msgHy)
+	}
 }

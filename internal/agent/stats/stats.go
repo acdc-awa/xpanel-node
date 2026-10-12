@@ -19,6 +19,7 @@ import (
 	statsService "github.com/xtls/xray-core/app/stats/command"
 	xrayProtocol "github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
+	hysteriaAccount "github.com/xtls/xray-core/proxy/hysteria/account"
 	"github.com/xtls/xray-core/proxy/vless"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -538,6 +539,11 @@ func (c *Collector) Collect(ctx context.Context) ([]Entry, error) {
 // 默认与 "vless" 走 VLESS Account；未来新协议（如 hysteria）可在此扩展分支。
 func buildAccountTyped(proto string, u protocol.User) *serial.TypedMessage {
 	switch proto {
+	case "hysteria":
+		account := &hysteriaAccount.Account{
+			Auth: u.UUID,
+		}
+		return serial.ToTypedMessage(account)
 	default:
 		account := &vless.Account{
 			Id:   u.UUID,
