@@ -4,7 +4,13 @@ XPanel 面板的被控节点 Agent：托管 Xray-core 进程，通过 WSS 长连
 
 - 主控仓库：**XPanel**（`github.com/acdc-awa/xpanel`）
 - 通信协议：见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（协议代码单源在 `pkg/protocol/`，主控经 go.mod 引入）
-- 锁定 Xray 版本：**v26.6.27**（26.7.x 的 REALITY minClientVer 会拒绝 mihomo 客户端）
+- 锁定 Xray 版本：**v26.10.17**（Go 依赖钉 `v1.260327.1-0.20261017152356-92ccc939aaf4`）
+  - 关于 REALITY 与 mihomo：Xray **≥26.9.8** 的服务端强制要求 ClientHello 携带 X25519MLKEM768
+    keyshare，而 mihomo 默认会主动剥离它（为兼容旧服务端）。订阅侧已固定输出
+    `support-x25519mlkem768: true`，因此面板签发的订阅在新内核上可直接使用；
+    且实际可用的 uTLS 指纹只有 `chrome` / `random`（其余指纹模板不含该 keyshare）。
+  - 历史上的「26.7.x 的 minClientVer 拒绝 mihomo」已不成立：该默认值在 26.9.8 起已被上游撤销。
+  - 节点上的 xray 内核可由面板下发 `upgrade_xray` 指令在线替换（停 xray → 校验 → 替换 → 拉起，失败自动回滚）。
 
 ## 安装节点（推荐）
 

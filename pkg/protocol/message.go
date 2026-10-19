@@ -35,6 +35,7 @@ const (
 
 	// 运维指令
 	MsgUpgradeAgent    = "upgrade_agent"    // 主控→节点：升级 agent 二进制（自升级，见 internal/agent/upgrade）
+	MsgUpgradeXray     = "upgrade_xray"     // 主控→节点：替换 node 上的 xray 内核二进制（停 xray → 校验 → 替换 → 拉起）
 	MsgUpgradeProgress = "upgrade_progress" // 节点→主控：agent 升级进度状态上报
 	MsgAgentSettings   = "agent_settings"   // 主控→节点：下发上报/心跳等运行时设置（0=保持不变）
 

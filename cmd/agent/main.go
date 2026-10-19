@@ -140,6 +140,7 @@ func main() {
 		CertsDir:        cfg.CertsDir,
 		Outbox:          outbox.New(cfg.OutboxPath),
 		Upgrade:         &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror, DownloadTimeout: cfg.Update.DownloadTimeout},
+		XrayUpgrade:     upgrade.NewXrayFetcher(cfg.Update.Mirror, cfg.Update.DownloadTimeout),
 		SelfRestart:     selfRestart,
 	}
 

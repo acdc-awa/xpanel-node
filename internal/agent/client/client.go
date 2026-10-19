@@ -62,6 +62,10 @@ type Client struct {
 	// nil = 手动运行模式，替换后仅提示手动重启。
 	Upgrade     *upgrade.Fetcher
 	SelfRestart func() error
+	// XrayUpgrade xray 内核升级源（repo 恒为 XTLS/Xray-core，镜像沿用 update 段）；nil = 不支持内核替换。
+	XrayUpgrade *upgrade.XrayFetcher
+	// xrayVersion 当前内核版本缓存（启动时与内核替换后探测；心跳只读，不额外起进程）。
+	xrayVersion atomic.Value // string
 	// Outbox 持久化发件箱（审计 F1）：采集到的增量先落盘成不可变批次，收到主控
 	// traffic_ack(ok) 才删批。nil 时 Run 内建纯内存发件箱（等价旧行为，仅供测试）。
 	Outbox *outbox.Outbox
@@ -71,6 +75,8 @@ type Client struct {
 	pendingMu sync.Mutex
 	pending   map[trafficKey]*pendingEntry // by (email, inboundTag, cycleID) 维度键
 	upgrading atomic.Bool                  // 面板触发升级进行中（防并发重复触发）
+	// upgradingXray xray 内核替换进行中（与 agent 自升级互斥：两者都会动 /usr/local/bin 下的可执行文件）。
+	upgradingXray atomic.Bool
 
 	// ackMode 主控是否支持流量批次落库回执（auth_ok 的 caps 声明，每次建连刷新）。
 	// false = 旧主控：无回执可等，发完即删（等价旧 agent 行为）。
@@ -109,6 +115,7 @@ type Client struct {
 
 // Run 常驻运行：流量采集上报 + 连接/服务/重连。
 func (c *Client) Run(ctx context.Context) {
+	c.initXrayVersion()
 	c.pending = make(map[trafficKey]*pendingEntry)
 	c.cycles = make(map[string]uint64)
 	c.sentThisConn = make(map[string]struct{})
@@ -709,6 +716,9 @@ func (c *Client) sendHeartbeat() error {
 		// 配置对账：主控拿 running_hash 判断节点跑的是不是它以为的那份配置，
 		// 拿 disk_hash 判断磁盘是否与它记录的一致（热更落盘会改 disk 不改 running）。
 		hb.DiskHash, hb.RunningHash = c.Xray.Hashes()
+		if v, ok := c.xrayVersion.Load().(string); ok {
+			hb.XrayVersion = v
+		}
 	}
 	return c.send(protocol.MsgHeartbeat, "", hb)
 }
@@ -920,6 +930,10 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		h := c.Xray.Health()
 		sd.XrayState, sd.XrayLastError, sd.XrayFailures = h.State, h.LastError, h.Failures
 		sd.DiskHash, sd.RunningHash = c.Xray.Hashes()
+		sd.XrayBin = c.Xray.Bin
+		if v, ok := c.xrayVersion.Load().(string); ok {
+			sd.XrayVersion = v
+		}
 		return &protocol.ResultPayload{OK: true, Data: sd}
 	case protocol.MsgGetLogs:
 		var p protocol.GetLogsPayload
@@ -935,6 +949,8 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		return c.handlePushCert(m)
 	case protocol.MsgUpgradeAgent:
 		return c.handleUpgradeAgent(m)
+	case protocol.MsgUpgradeXray:
+		return c.handleUpgradeXray(m)
 	case protocol.MsgAgentSettings:
 		var p protocol.AgentSettingsPayload
 		if err := m.PayloadTo(&p); err != nil {

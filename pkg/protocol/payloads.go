@@ -36,6 +36,9 @@ type HeartbeatPayload struct {
 	// 拿 DiskHash 判断磁盘是否与它记录的一致。
 	DiskHash    string `json:"disk_hash,omitempty"`
 	RunningHash string `json:"running_hash,omitempty"`
+	// XrayVersion 当前 xray 内核版本（如 "26.10.17"）。旧 agent 不填、旧主控忽略未知字段。
+	// 节点在启动与内核替换后探测并缓存，心跳只读缓存，不额外起进程。
+	XrayVersion string `json:"xray_version,omitempty"`
 }
 
 // OnlineUserIPs 单个用户当前活跃连接的去重源 IP（refcount 快照，连接断开即移除；
@@ -189,6 +192,16 @@ type UpgradeProgressPayload struct {
 	Message string `json:"message"`
 	Error   string `json:"error,omitempty"`
 	TS      int64  `json:"ts"`
+	// Kind 升级对象：空/agent（旧节点默认）| xray。旧主控忽略该字段，
+	// 因此 agent 升级行为与既有语义完全一致。
+	Kind string `json:"kind,omitempty"`
+}
+
+// UpgradeXrayPayload 主控→节点：替换 xray 内核二进制。
+// Target 为空 = 由节点查询 XTLS/Xray-core 最新 release；Force 为 true 时允许降级/同版本强制重装。
+type UpgradeXrayPayload struct {
+	Target string `json:"target,omitempty"`
+	Force  bool   `json:"force,omitempty"`
 }
 
 // AgentSettingsPayload 主控→节点：运行时设置（连接建立与设置保存时下发，仅当前会话生效，
@@ -215,6 +228,10 @@ type StatusData struct {
 	UptimeSec   int64      `json:"uptime_sec,omitempty"`
 	ConfigPath  string     `json:"config_path,omitempty"`
 	StartedAt   *time.Time `json:"started_at,omitempty"` // 未托管实例（上一轮 agent 遗留）无此值
+	// XrayVersion 当前 xray 内核版本（旧 agent 不填，旧主控忽略未知字段）
+	XrayVersion string `json:"xray_version,omitempty"`
+	// XrayBin 当前 xray 可执行文件路径
+	XrayBin string `json:"xray_bin,omitempty"`
 	// 启动失败可观测性（2026-09-21，旧主控忽略未知字段）
 	XrayState     string `json:"xray_state,omitempty"`
 	XrayLastError string `json:"xray_last_error,omitempty"`

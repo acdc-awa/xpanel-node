@@ -55,6 +55,7 @@
 | `rotate_internal_account` | SetupInternalAccountPayload | 重新生成内部 UUID |
 | `push_cert` | PushCertPayload | TLS 证书下发（agent 校验 PEM 匹配后落盘） |
 | `upgrade_agent` | UpgradeAgentPayload | 触发 agent 自升级到最新 release（见 §5 时序），回 `result`（data 为升级结果文本） |
+| `upgrade_xray` | UpgradeXrayPayload | 替换节点上的 **xray 内核**二进制（停 xray → 校验 → 替换 → 拉起，失败用 `.prev` 回滚），回 `result`（data 为结果文本） |
 | `agent_settings` | AgentSettingsPayload | 下发运行时设置（连接建立与设置保存时；0=不变），回 `result`（data 为变更摘要） |
 | `traffic_ack` | TrafficAckPayload | 流量批次落库回执（`{batch_id, ok, error?}`）。节点收到 `ok=true` 才删本地发件箱中的该批次；未收到（写库失败/主控崩溃/回执丢失/连接断开）则保留重发，重复投递由主控按 `batch_id` 去重吸收。非指令，不回 `result` |
 
@@ -159,3 +160,12 @@ StatusData         { xray_running, pid?, uptime_sec?, config_path?, started_at?,
   - 结论：**升级顺序不构成数据风险，可任意先后**。仍建议先升主控再升 agent——先升主控才能让新
     agent 一上来就拿到回执与账期归属，否则新 agent 会先按降级路径跑一段（数据正确但粒度退化为旧口径）。
 - `upgrade_agent` 于面板端触发（服务器页「升级」）；不支持该指令的旧 agent 收到后不回应，主控侧表现为等待回执超时。节点侧 CLI `xray-agent upgrade` 主动拉取升级仍然保留，两条路径共用 `internal/agent/upgrade` 的下载/校验/替换逻辑。
+- **`upgrade_xray`（xray 内核替换）**：节点从 `XTLS/Xray-core` 的 release 下载压缩包，用同名 `.dgst`
+  里的 `SHA2-256` 做强制校验，再解包取出 `xray`。流程与安全约束：
+  1. 新二进制先在临时文件上跑 `xray version` 并比对目标版本——**在停掉 xray 之前**完成，
+     避免下载到坏包先造成停服；
+  2. 停 xray → 现有二进制备份为 `xray.prev` → 原子替换 → 再次探测落盘版本；
+  3. 拉起失败则用 `.prev` 回滚并重试拉起；回滚后仍起不来时如实回执 `ok=false`（需人工介入）。
+  4. 进度经 `upgrade_progress` 上报，`kind="xray"` 与 agent 自升级区分。
+  - 旧 agent 收到 `upgrade_xray` 会静默丢弃（见 §6 未知消息语义），主控侧表现为回执超时。
+  - 与 `upgrade_agent` 互斥：两者都会动可执行文件，节点侧用同一个升级锁串行化。

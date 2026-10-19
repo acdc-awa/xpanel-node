@@ -14,7 +14,7 @@
 #   --agent-url <url>    完全自定义 agent 二进制下载地址（优先于 version/mirror 推导）
 #   --agent-file <path>  本地 agent 二进制（离线/scp 场景，优先于一切下载）
 #   --agent-digest <sha> 期望的 agent 二进制 sha256（提供则强制校验，不匹配拒绝安装）
-#   --xray-version <v>   xray 版本（默认 v26.6.27，与验证环境一致）
+#   --xray-version <v>   xray 版本（默认 v26.10.17；已装且可用时跳过下载，换版本请先删 /usr/local/bin/xray 或加 --xray-force）
 #   --xray-file <path>   本地 xray 压缩包（Xray-linux-*.zip，完全离线安装场景）
 #   --xray-digest <sha>  期望的 xray 压缩包 sha256（提供则强制校验）
 #   --force-config       重置 /etc/xray-agent/config.yml（默认已存在则保留；重置前自动备份 .bak）
@@ -34,7 +34,7 @@ AGENT_MIRROR=""
 AGENT_URL=""
 AGENT_FILE=""
 AGENT_DIGEST=""
-XRAY_VERSION="v26.6.27"
+XRAY_VERSION="v26.10.17"
 XRAY_FILE_LOCAL=""
 XRAY_DIGEST=""
 FORCE_CONFIG=0
@@ -238,7 +238,10 @@ if [[ -n "$XRAY_FILE_LOCAL" ]]; then
   run install -m 0644 /tmp/xray-extract/geosite.dat /usr/local/share/xray/geosite.dat
   run rm -rf /tmp/xray-extract
   echo "    本地 Xray 及规则数据安装完成"
-elif [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 2>&1 || [[ ! -f /usr/local/share/xray/geoip.dat ]] || [[ ! -f /usr/local/share/xray/geosite.dat ]]; then
+elif [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 2>&1 || [[ ! -f /usr/local/share/xray/geoip.dat ]] || [[ ! -f /usr/local/share/xray/geosite.dat ]] || [[ "$( /usr/local/bin/xray version 2>/dev/null | awk 'NR==1{print $2}' )" != "${XRAY_VERSION#v}" ]]; then
+  # 版本比对用 `xray version` 第一个输出行的第 2 个字段（严格等于，不做子串匹配，
+  # 否则 26.1 会误配 26.10.17）。旧实现只判断"文件存在且可执行"，导致
+  # --xray-version 换版本时被静默跳过（重跑安装脚本永远升不上去，必须手动删 /usr/local/bin/xray）。
   case "$ARCH" in
     amd64) XRAY_ARCH="64" ;;
     arm64) XRAY_ARCH="arm64-v8a" ;;
