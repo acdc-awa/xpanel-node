@@ -104,6 +104,10 @@ const CapTrafficAck = "traffic_ack"
 // certificates[].certificateFile（否则退回内联 PEM，保证旧 agent 可用）。
 const CapPushCA = "push_ca"
 
+// CapSyncCerts 节点能力：支持 sync_certs 清理不再被引用的托管证书目录。
+// 主控只在节点声明该能力后下发 GC；旧 agent 忽略未知消息（不回帧），主控不会等它。
+const CapSyncCerts = "sync_certs"
+
 // HasCapability 判断能力列表是否包含 cap（nil/空列表返回 false）。
 func HasCapability(caps []string, cap string) bool {
 	for _, c := range caps {
@@ -196,6 +200,12 @@ type PushCAPayload struct {
 	ID      uint64 `json:"id"`
 	Name    string `json:"name,omitempty"` // 仅用于日志/回执
 	CertPEM string `json:"cert_pem"`
+}
+
+// SyncCertsPayload 主控→节点：证书目录 GC。Domains 是当前仍被引用的托管证书域名全集；
+// 节点删除 <certs_dir> 下不在该集合中的托管证书目录（只删 push_cert 写出的布局，不碰其它文件）。
+type SyncCertsPayload struct {
+	Domains []string `json:"domains"`
 }
 
 // InternalUUIDReportPayload 节点→主控：内部 UUID 变更主动上报（如 CLI 轮换）。

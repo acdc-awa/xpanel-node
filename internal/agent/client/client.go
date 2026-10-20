@@ -701,7 +701,7 @@ func (c *Client) sendHeartbeat() error {
 		RxBytes:     snap.RxBytes,
 		TxBytes:     snap.TxBytes,
 		Version:     upgrade.Version,
-		Caps:        []string{protocol.CapPushCA},
+		Caps:        []string{protocol.CapPushCA, protocol.CapSyncCerts},
 		TS:          time.Now().Unix(),
 	}
 	// xray 起不来时把状态与原因带回主控（面板据此显示"为什么没起来"），
@@ -950,6 +950,8 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		return c.handlePushCert(m)
 	case protocol.MsgPushCA:
 		return c.handlePushCA(m)
+	case protocol.MsgSyncCerts:
+		return c.handleSyncCerts(m)
 	case protocol.MsgUpgradeAgent:
 		return c.handleUpgradeAgent(m)
 	case protocol.MsgUpgradeXray:
@@ -1162,4 +1164,20 @@ func (c *Client) handlePushCA(m *protocol.Message) *protocol.ResultPayload {
 		return &protocol.ResultPayload{OK: false, Error: err.Error()}
 	}
 	return &protocol.ResultPayload{OK: true, Data: path}
+}
+
+// handleSyncCerts 证书目录 GC：删除不再被任何入站引用的托管证书目录。
+func (c *Client) handleSyncCerts(m *protocol.Message) *protocol.ResultPayload {
+	if c.CertsDir == "" {
+		return &protocol.ResultPayload{OK: false, Error: "证书目录未配置"}
+	}
+	var p protocol.SyncCertsPayload
+	if err := m.PayloadTo(&p); err != nil {
+		return &protocol.ResultPayload{OK: false, Error: "解析 sync_certs 失败: " + err.Error()}
+	}
+	removed, err := certs.SyncManaged(c.CertsDir, p.Domains)
+	if err != nil {
+		return &protocol.ResultPayload{OK: false, Error: err.Error()}
+	}
+	return &protocol.ResultPayload{OK: true, Data: removed}
 }

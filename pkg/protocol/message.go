@@ -32,6 +32,7 @@ const (
 	MsgRotateInternalAccount = "rotate_internal_account" // 主控→节点：重新生成内部 UUID
 	MsgPushCert              = "push_cert"               // 主控→节点：TLS 证书下发落盘
 	MsgPushCA                = "push_ca"                 // 主控→节点：CA 根证书下发落盘（出站 TLS 验签用，不含私钥）
+	MsgSyncCerts             = "sync_certs"              // 主控→节点：证书目录 GC（只保留当前引用的托管证书）
 	MsgInternalUUIDReport    = "internal_uuid_report"    // 节点→主控：内部 UUID 变更主动上报（主控侧已实现接收；agent 当前不发，保留备用）
 
 	// 运维指令

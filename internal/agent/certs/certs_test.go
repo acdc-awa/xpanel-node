@@ -185,3 +185,63 @@ func TestWriteCARejectsZeroID(t *testing.T) {
 		t.Error("id=0 应被拒绝")
 	}
 }
+
+func TestSyncManaged(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM, _ := genCert(t, "keep.local")
+	for _, d := range []string{"keep.local", "stale.local"} {
+		if err := Write(dir, d, certPEM, keyPEM); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 非托管内容：CA 目录、无 fullchain 的人工目录、根目录散文件
+	if err := os.MkdirAll(filepath.Join(dir, "ca"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ca", "1.crt"), []byte("ca"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "manual-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manual-dir", "notes.txt"), []byte("hand made"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "loose.pem"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := SyncManaged(dir, []string{"keep.local"})
+	if err != nil {
+		t.Fatalf("SyncManaged: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != "stale.local" {
+		t.Errorf("removed = %v, want [stale.local]", removed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "stale.local")); !os.IsNotExist(err) {
+		t.Error("stale.local 应被删除")
+	}
+	for _, keep := range []string{"keep.local", "ca", "manual-dir"} {
+		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
+			t.Errorf("%s 不应被删除: %v", keep, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "loose.pem")); err != nil {
+		t.Error("根目录散文件不应被删除")
+	}
+}
+
+func TestSyncManagedEmptySetRemovesAllManaged(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM, _ := genCert(t, "a.local")
+	if err := Write(dir, "a.local", certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := SyncManaged(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != "a.local" {
+		t.Errorf("removed = %v, want [a.local]", removed)
+	}
+}

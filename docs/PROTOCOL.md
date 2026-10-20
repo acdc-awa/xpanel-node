@@ -55,6 +55,7 @@
 | `rotate_internal_account` | SetupInternalAccountPayload | 重新生成内部 UUID |
 | `push_cert` | PushCertPayload | TLS 证书下发（agent 校验 PEM 匹配后落盘） |
 | `push_ca` | PushCAPayload | CA 根证书下发（只有公钥，落盘 `<certs_dir>/ca/<id>.crt`；出站配置以 `certificateFile` 引用）。**旧 agent 会静默丢弃且不回帧**——主控必须先看节点心跳 `caps` 是否含 `push_ca`，未声明时退回内联 PEM |
+| `sync_certs` | SyncCertsPayload | 证书目录 GC：主控下发当前仍被引用的域名全集，节点删除 `<certs_dir>` 下不在集合中的托管证书目录（只删含 `fullchain.pem` 的 `push_cert` 布局，不碰 `ca/` 与人工文件）。需节点声明 `sync_certs` 能力 |
 | `upgrade_agent` | UpgradeAgentPayload | 触发 agent 自升级到最新 release（见 §5 时序），回 `result`（data 为升级结果文本） |
 | `upgrade_xray` | UpgradeXrayPayload | 替换节点上的 **xray 内核**二进制（停 xray → 校验 → 替换 → 拉起，失败用 `.prev` 回滚），回 `result`（data 为结果文本） |
 | `agent_settings` | AgentSettingsPayload | 下发运行时设置（连接建立与设置保存时；0=不变），回 `result`（data 为变更摘要） |
@@ -68,7 +69,7 @@ HeartbeatPayload   { cpu, mem, mem_total, disk, disk_total, xray_running,
                      online_users, online_ips?,  // 在线用户数 + 每用户在线 IP 快照
                      rx_rate, tx_rate, rx_bytes, tx_bytes,
                      version?,  // agent 版本（v0.1.0+；旧 agent 不上报）
-                     caps?,     // 节点能力声明（数组；旧 agent 不发）。当前：push_ca
+                     caps?,     // 节点能力声明（数组；旧 agent 不发）。当前：push_ca / sync_certs
                      ts }       // unix 秒
 // online_ips: OnlineUserIPs { email, ips }[] —— xray GetUsersStats 快照，
 // 仅含当前有活跃连接的用户；连接断开即移除（refcount，无宽限期）。
@@ -92,6 +93,7 @@ SetupInternalAccountPayload { tag }
 SetupInternalResult         { tag, uuid }          // uuid 由节点生成，主控以此覆盖 DB
 PushCertPayload    { domain, cert_pem, key_pem }
 PushCAPayload      { id, name?, cert_pem }     // CA 仅公钥；落盘 <certs_dir>/ca/<id>.crt
+SyncCertsPayload   { domains: string[] }       // 证书 GC：保留的托管证书域名全集（空 = 清空全部托管目录）
 InternalUUIDReportPayload { tag, uuid }
 UpgradeAgentPayload { target?, force? }       // target: 空 = 拉取最新 release; force: 强制安装/允许旧版本回滚
 UpgradeProgressPayload { phase, target?, message, error?, ts }

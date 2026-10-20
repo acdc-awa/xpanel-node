@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/acdc-awa/xpanel-node/internal/agent/accounts"
+	"github.com/acdc-awa/xpanel-node/internal/agent/certs"
 	"github.com/acdc-awa/xpanel-node/pkg/protocol"
 )
 
@@ -289,5 +290,25 @@ func TestDispatchPushCARejectsZeroID(t *testing.T) {
 	res := c.dispatch(mustMsg(t, protocol.MsgPushCA, protocol.PushCAPayload{ID: 0, CertPEM: testCA(t)}))
 	if res == nil || res.OK {
 		t.Fatalf("id=0 应失败: %+v", res)
+	}
+}
+
+func TestDispatchSyncCerts(t *testing.T) {
+	c := setupClient(t)
+	certPEM, keyPEM := testCert(t)
+	for _, d := range []string{"keep.local", "stale.local"} {
+		if err := certs.Write(c.CertsDir, d, certPEM, keyPEM); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := c.dispatch(mustMsg(t, protocol.MsgSyncCerts, protocol.SyncCertsPayload{Domains: []string{"keep.local"}}))
+	if res == nil || !res.OK {
+		t.Fatalf("sync_certs 应成功: %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(c.CertsDir, "stale.local")); !os.IsNotExist(err) {
+		t.Error("stale.local 应被清理")
+	}
+	if _, err := os.Stat(filepath.Join(c.CertsDir, "keep.local", "fullchain.pem")); err != nil {
+		t.Error("keep.local 应保留")
 	}
 }

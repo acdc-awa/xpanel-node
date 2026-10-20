@@ -78,6 +78,48 @@ func WriteCA(dir string, id uint64, certPEM string) (string, error) {
 	return path, nil
 }
 
+// SyncManaged 清理 <dir> 下不再被引用的托管证书目录，返回被删除的域名列表。
+//
+// 只处理同时满足以下条件的子目录，避免误删人工放置的东西：
+//   - 目录名是合法域名（DomainRe）；
+//   - 不是 ca/（CA 公钥由 push_ca 管理，另有生命周期）；
+//   - 目录内存在 fullchain.pem（即 push_cert 写出的布局）。
+//
+// domains 是主控当前仍引用的域名全集；缺省/空集合表示"没有任何证书被引用"，
+// 此时会清掉全部托管目录（解绑/删除后的正常 GC 行为）。
+func SyncManaged(dir string, domains []string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取证书目录失败: %w", err)
+	}
+	keep := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		keep[d] = true
+	}
+	var removed []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "ca" || !tlscert.DomainRe.MatchString(name) || keep[name] {
+			continue
+		}
+		sub := filepath.Join(dir, name)
+		if _, err := os.Stat(filepath.Join(sub, "fullchain.pem")); err != nil {
+			continue // 不是 push_cert 布局：视为人工目录，不碰
+		}
+		if err := os.RemoveAll(sub); err != nil {
+			return removed, fmt.Errorf("删除证书目录 %s 失败: %w", name, err)
+		}
+		removed = append(removed, name)
+	}
+	return removed, nil
+}
+
 // SanitizeDomain 供日志使用（委托共享包）。
 func SanitizeDomain(domain string) string {
 	return tlscert.SanitizeDomain(domain)
