@@ -86,6 +86,19 @@ func ParseLeaf(certPEM string) (*x509.Certificate, error) {
 	return certs[0], nil
 }
 
+// ParseCA 解析并校验 CA 根证书：第一张证书必须带 BasicConstraints.IsCA=true。
+// 仅用于主控 push_ca 的落盘前校验（节点只需要公钥，不需要私钥）。
+func ParseCA(certPEM string) (*x509.Certificate, error) {
+	leaf, err := ParseLeaf(certPEM)
+	if err != nil {
+		return nil, err
+	}
+	if !leaf.IsCA {
+		return nil, fmt.Errorf("证书不是 CA（BasicConstraints.IsCA=false）")
+	}
+	return leaf, nil
+}
+
 // NotAfter 返回证书链 leaf 的到期时间（用于 certs 表）。
 func NotAfter(certPEM string) (time.Time, error) {
 	leaf, err := ParseLeaf(certPEM)

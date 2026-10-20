@@ -701,6 +701,7 @@ func (c *Client) sendHeartbeat() error {
 		RxBytes:     snap.RxBytes,
 		TxBytes:     snap.TxBytes,
 		Version:     upgrade.Version,
+		Caps:        []string{protocol.CapPushCA},
 		TS:          time.Now().Unix(),
 	}
 	// xray 起不来时把状态与原因带回主控（面板据此显示"为什么没起来"），
@@ -947,6 +948,8 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 		return c.handleInternalAccount(m, m.Type == protocol.MsgRotateInternalAccount)
 	case protocol.MsgPushCert:
 		return c.handlePushCert(m)
+	case protocol.MsgPushCA:
+		return c.handlePushCA(m)
 	case protocol.MsgUpgradeAgent:
 		return c.handleUpgradeAgent(m)
 	case protocol.MsgUpgradeXray:
@@ -1142,4 +1145,21 @@ func (c *Client) handlePushCert(m *protocol.Message) *protocol.ResultPayload {
 		return &protocol.ResultPayload{OK: false, Error: err.Error()}
 	}
 	return &protocol.ResultPayload{OK: true, Data: "证书已落盘 " + certs.SanitizeDomain(p.Domain)}
+}
+
+// handlePushCA CA 根证书下发：校验 IsCA → 原子落盘 <certs_dir>/ca/<id>.crt → 回执。
+// 只有公钥进入节点，CA 私钥始终留在主控。
+func (c *Client) handlePushCA(m *protocol.Message) *protocol.ResultPayload {
+	if c.CertsDir == "" {
+		return &protocol.ResultPayload{OK: false, Error: "证书目录未配置"}
+	}
+	var p protocol.PushCAPayload
+	if err := m.PayloadTo(&p); err != nil {
+		return &protocol.ResultPayload{OK: false, Error: "解析 push_ca 失败: " + err.Error()}
+	}
+	path, err := certs.WriteCA(c.CertsDir, p.ID, p.CertPEM)
+	if err != nil {
+		return &protocol.ResultPayload{OK: false, Error: err.Error()}
+	}
+	return &protocol.ResultPayload{OK: true, Data: path}
 }

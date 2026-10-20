@@ -231,3 +231,63 @@ func TestApplyAgentSettings(t *testing.T) {
 		t.Fatalf("全 0 设置不得改动现值, got %s", got)
 	}
 }
+
+// testCA 生成自签 CA 证书（IsCA=true，push_ca 用例）。
+func testCA(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(9),
+		Subject:               pkix.Name{CommonName: "Test Root CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+func TestDispatchPushCA(t *testing.T) {
+	c := setupClient(t)
+	caPEM := testCA(t)
+	res := c.dispatch(mustMsg(t, protocol.MsgPushCA, protocol.PushCAPayload{ID: 3, Name: "root", CertPEM: caPEM}))
+	if res == nil || !res.OK {
+		t.Fatalf("push_ca 应成功: %+v", res)
+	}
+	f := filepath.Join(c.CertsDir, "ca", "3.crt")
+	data, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatalf("缺少 %s: %v", f, err)
+	}
+	if string(data) != caPEM {
+		t.Error("CA 内容不一致")
+	}
+}
+
+func TestDispatchPushCARejectsLeaf(t *testing.T) {
+	c := setupClient(t)
+	certPEM, _ := testCert(t)
+	res := c.dispatch(mustMsg(t, protocol.MsgPushCA, protocol.PushCAPayload{ID: 4, CertPEM: certPEM}))
+	if res == nil || res.OK {
+		t.Fatalf("非 CA 证书应失败: %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(c.CertsDir, "ca")); !os.IsNotExist(err) {
+		t.Error("失败时不应创建 CA 目录")
+	}
+}
+
+func TestDispatchPushCARejectsZeroID(t *testing.T) {
+	c := setupClient(t)
+	res := c.dispatch(mustMsg(t, protocol.MsgPushCA, protocol.PushCAPayload{ID: 0, CertPEM: testCA(t)}))
+	if res == nil || res.OK {
+		t.Fatalf("id=0 应失败: %+v", res)
+	}
+}

@@ -119,3 +119,69 @@ func TestSanitizeDomain(t *testing.T) {
 		t.Errorf("SanitizeDomain 未去除控制字符: %q", got)
 	}
 }
+
+// genCA 生成自签 CA 根证书（IsCA=true）。
+func genCA(t *testing.T, cn string) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+func TestWriteCA(t *testing.T) {
+	dir := t.TempDir()
+	caPEM := genCA(t, "Probe Root CA")
+	path, err := WriteCA(dir, 7, caPEM)
+	if err != nil {
+		t.Fatalf("WriteCA: %v", err)
+	}
+	if path != filepath.Join(dir, "ca", "7.crt") {
+		t.Errorf("路径 = %s, want %s", path, filepath.Join(dir, "ca", "7.crt"))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取落盘 CA: %v", err)
+	}
+	if string(data) != caPEM {
+		t.Error("CA 内容不一致")
+	}
+	if runtime.GOOS != "windows" {
+		if info, _ := os.Stat(path); info.Mode().Perm() != 0o644 {
+			t.Errorf("CA 权限 = %o, want 644", info.Mode().Perm())
+		}
+	}
+}
+
+func TestWriteCARejectsNonCA(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, _, _ := genCert(t, "leaf.local")
+	if _, err := WriteCA(dir, 1, certPEM); err == nil {
+		t.Error("非 CA 证书应被拒绝")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca")); !os.IsNotExist(err) {
+		t.Error("校验失败时不应创建目录")
+	}
+}
+
+func TestWriteCARejectsZeroID(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := WriteCA(dir, 0, genCA(t, "x")); err == nil {
+		t.Error("id=0 应被拒绝")
+	}
+}

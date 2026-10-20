@@ -23,7 +23,10 @@ type HeartbeatPayload struct {
 	RxBytes     uint64          `json:"rx_bytes"`          // 累计物理网卡接收字节
 	TxBytes     uint64          `json:"tx_bytes"`          // 累计物理网卡发送字节
 	Version     string          `json:"version,omitempty"` // agent 版本（旧 agent 不上报）
-	TS          int64           `json:"ts"`                // unix 秒
+	// Caps 节点能力声明（agent→主控）：主控据此决定能否使用只在新 agent 上可行的配置形态。
+	// 旧 agent 不发（nil）；旧主控忽略未知字段。当前仅 CapPushCA。
+	Caps []string `json:"caps,omitempty"`
+	TS   int64    `json:"ts"` // unix 秒
 	// 启动失败可观测性（2026-09-21）：xray 起不来时把状态与原因带回主控，
 	// 面板不再只看到"未运行"却不知道为什么。旧主控忽略未知字段、旧 agent 不发（字段为空）。
 	XrayState     string `json:"xray_state,omitempty"`            // running / restarting / failed / stopped
@@ -95,6 +98,21 @@ type TrafficAckPayload struct {
 
 // CapTrafficAck 主控能力：流量批次落库回执 + BatchID 去重（见 AuthOKPayload.Caps）。
 const CapTrafficAck = "traffic_ack"
+
+// CapPushCA 节点能力：支持 push_ca 把 CA 根证书落盘。
+// 主控只有在节点心跳声明该能力后，才会把出站 TLS 验签写成
+// certificates[].certificateFile（否则退回内联 PEM，保证旧 agent 可用）。
+const CapPushCA = "push_ca"
+
+// HasCapability 判断能力列表是否包含 cap（nil/空列表返回 false）。
+func HasCapability(caps []string, cap string) bool {
+	for _, c := range caps {
+		if c == cap {
+			return true
+		}
+	}
+	return false
+}
 
 // AuthOKPayload 主控→节点：认证成功回执。
 //
@@ -170,6 +188,14 @@ type PushCertPayload struct {
 	Domain  string `json:"domain"`
 	CertPEM string `json:"cert_pem"`
 	KeyPEM  string `json:"key_pem"`
+}
+
+// PushCAPayload 主控→节点：CA 根证书下发（只下发公钥，CA 私钥永不离开面板）。
+// 节点落盘到 <certs_dir>/ca/<id>.crt；出站配置以 certificateFile 引用它做验签。
+type PushCAPayload struct {
+	ID      uint64 `json:"id"`
+	Name    string `json:"name,omitempty"` // 仅用于日志/回执
+	CertPEM string `json:"cert_pem"`
 }
 
 // InternalUUIDReportPayload 节点→主控：内部 UUID 变更主动上报（如 CLI 轮换）。

@@ -36,7 +36,7 @@
 | type | payload | 说明 |
 |---|---|---|
 | `auth` | AuthPayload | 首条认证消息（见 §2） |
-| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标、agent 版本与 xray 健康状态（`xray_state`/`xray_last_error`/`xray_error_at`/`xray_restart_failures`，2026-09-21 新增；旧主控忽略未知字段、旧 agent 不发送） |
+| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标、agent 版本、能力声明（`caps`）与 xray 健康状态（`xray_state`/`xray_last_error`/`xray_error_at`/`xray_restart_failures`，2026-09-21 新增；旧主控忽略未知字段、旧 agent 不发送） |
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s）。带 `batch_id` 的批次，主控落库后回 `traffic_ack` |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
 | `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更上报。**主控侧已实现接收**，但节点当前不发送（内部 UUID 由 `setup_internal_account` 的 `result` 回执承载），保留类型供后续使用 |
@@ -54,6 +54,7 @@
 | `setup_internal_account` | SetupInternalAccountPayload | 为 relay 入站生成内部 UUID，回 `result`（data 为 SetupInternalResult） |
 | `rotate_internal_account` | SetupInternalAccountPayload | 重新生成内部 UUID |
 | `push_cert` | PushCertPayload | TLS 证书下发（agent 校验 PEM 匹配后落盘） |
+| `push_ca` | PushCAPayload | CA 根证书下发（只有公钥，落盘 `<certs_dir>/ca/<id>.crt`；出站配置以 `certificateFile` 引用）。**旧 agent 会静默丢弃且不回帧**——主控必须先看节点心跳 `caps` 是否含 `push_ca`，未声明时退回内联 PEM |
 | `upgrade_agent` | UpgradeAgentPayload | 触发 agent 自升级到最新 release（见 §5 时序），回 `result`（data 为升级结果文本） |
 | `upgrade_xray` | UpgradeXrayPayload | 替换节点上的 **xray 内核**二进制（停 xray → 校验 → 替换 → 拉起，失败用 `.prev` 回滚），回 `result`（data 为结果文本） |
 | `agent_settings` | AgentSettingsPayload | 下发运行时设置（连接建立与设置保存时；0=不变），回 `result`（data 为变更摘要） |
@@ -67,6 +68,7 @@ HeartbeatPayload   { cpu, mem, mem_total, disk, disk_total, xray_running,
                      online_users, online_ips?,  // 在线用户数 + 每用户在线 IP 快照
                      rx_rate, tx_rate, rx_bytes, tx_bytes,
                      version?,  // agent 版本（v0.1.0+；旧 agent 不上报）
+                     caps?,     // 节点能力声明（数组；旧 agent 不发）。当前：push_ca
                      ts }       // unix 秒
 // online_ips: OnlineUserIPs { email, ips }[] —— xray GetUsersStats 快照，
 // 仅含当前有活跃连接的用户；连接断开即移除（refcount，无宽限期）。
@@ -89,6 +91,7 @@ GetLogsPayload     { lines }
 SetupInternalAccountPayload { tag }
 SetupInternalResult         { tag, uuid }          // uuid 由节点生成，主控以此覆盖 DB
 PushCertPayload    { domain, cert_pem, key_pem }
+PushCAPayload      { id, name?, cert_pem }     // CA 仅公钥；落盘 <certs_dir>/ca/<id>.crt
 InternalUUIDReportPayload { tag, uuid }
 UpgradeAgentPayload { target?, force? }       // target: 空 = 拉取最新 release; force: 强制安装/允许旧版本回滚
 UpgradeProgressPayload { phase, target?, message, error?, ts }

@@ -52,6 +52,32 @@ func atomicWrite(path, content string, perm os.FileMode) error {
 	return nil
 }
 
+// CAPath CA 根证书的固定落盘路径：<certs_dir>/ca/<id>.crt。
+// 主控按同一约定生成出站配置的 certificateFile（见 contracts.CACertPath）。
+func CAPath(dir string, id uint64) string {
+	return filepath.Join(dir, "ca", fmt.Sprintf("%d.crt", id))
+}
+
+// WriteCA 校验并落盘 CA 根证书（只有公钥；CA 私钥永不下发）。
+// 返回落盘路径供回执/日志使用。
+func WriteCA(dir string, id uint64, certPEM string) (string, error) {
+	if id == 0 {
+		return "", fmt.Errorf("CA id 不能为 0")
+	}
+	if _, err := tlscert.ParseCA(certPEM); err != nil {
+		return "", err
+	}
+	sub := filepath.Join(dir, "ca")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		return "", fmt.Errorf("创建 CA 目录失败: %w", err)
+	}
+	path := CAPath(dir, id)
+	if err := atomicWrite(path, certPEM, 0o644); err != nil {
+		return "", fmt.Errorf("写 CA 证书失败: %w", err)
+	}
+	return path, nil
+}
+
 // SanitizeDomain 供日志使用（委托共享包）。
 func SanitizeDomain(domain string) string {
 	return tlscert.SanitizeDomain(domain)
