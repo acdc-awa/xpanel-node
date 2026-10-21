@@ -99,6 +99,52 @@ func TestFetcherLatestNoRedirect(t *testing.T) {
 	}
 }
 
+// atom 包含 prerelease；/releases/latest 仍指向旧正式版时，必须取 atom 的首条。
+func TestFetcherLatestAtomIncludesPrerelease(t *testing.T) {
+	const repo = "o/r"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+repo+"/releases.atom", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/atom+xml")
+		fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><link rel="alternate" type="text/html" href="https://github.com/o/r/releases/tag/v2.0.0-rc.1"/></entry>
+  <entry><link rel="alternate" type="text/html" href="https://github.com/o/r/releases/tag/v1.0.0"/></entry>
+</feed>`)
+	})
+	mux.HandleFunc("/"+repo+"/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/"+repo+"/releases/tag/v1.0.0")
+		w.WriteHeader(http.StatusFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	f := &Fetcher{Repo: repo, Mirrors: []string{srv.URL}, RequireAtom: true}
+	v, err := f.Latest()
+	if err != nil || v != "v2.0.0-rc.1" {
+		t.Fatalf("Latest = %q, %v，want v2.0.0-rc.1（atom 首条 prerelease）", v, err)
+	}
+}
+
+// RequireAtom=true 时不得回退 /releases/latest（否则会拿到被 prerelease 掩盖的旧正式版）。
+func TestFetcherLatestRequireAtomNoRedirectFallback(t *testing.T) {
+	const repo = "o/r"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/"+repo+"/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/"+repo+"/releases/tag/v1.0.0")
+		w.WriteHeader(http.StatusFound)
+	})
+	mux.HandleFunc("/"+repo+"/releases.atom", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	f := &Fetcher{Repo: repo, Mirrors: []string{srv.URL}, RequireAtom: true}
+	if v, err := f.Latest(); err == nil {
+		t.Fatalf("Latest = %q, want error（RequireAtom 不应回退 302）", v)
+	}
+}
+
 func TestFetcherDownload(t *testing.T) {
 	_, f := newFakeGitHub(t, fakeRelease{Tag: "v1.2.3", Data: []byte("agent-binary")})
 	data, sum, err := f.Download("v1.2.3")

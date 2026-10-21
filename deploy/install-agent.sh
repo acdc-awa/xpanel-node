@@ -14,7 +14,8 @@
 #   --agent-url <url>    完全自定义 agent 二进制下载地址（优先于 version/mirror 推导）
 #   --agent-file <path>  本地 agent 二进制（离线/scp 场景，优先于一切下载）
 #   --agent-digest <sha> 期望的 agent 二进制 sha256（提供则强制校验，不匹配拒绝安装）
-#   --xray-version <v>   xray 版本（默认 v26.10.17；已装且可用时跳过下载，换版本请先删 /usr/local/bin/xray 或加 --xray-force）
+#   --xray-version <v>   xray 版本（默认 v26.10.21；仅首次安装或显式指定时使用）
+#   --xray-force         强制按 --xray-version 重装内核（面板已支持自由升降级，通常无需本参数）
 #   --xray-file <path>   本地 xray 压缩包（Xray-linux-*.zip，完全离线安装场景）
 #   --xray-digest <sha>  期望的 xray 压缩包 sha256（提供则强制校验）
 #   --force-config       重置 /etc/xray-agent/config.yml（默认已存在则保留；重置前自动备份 .bak）
@@ -34,7 +35,9 @@ AGENT_MIRROR=""
 AGENT_URL=""
 AGENT_FILE=""
 AGENT_DIGEST=""
-XRAY_VERSION="v26.10.17"
+XRAY_VERSION="v26.10.21"
+XRAY_VERSION_EXPLICIT=0
+XRAY_FORCE=0
 XRAY_FILE_LOCAL=""
 XRAY_DIGEST=""
 FORCE_CONFIG=0
@@ -57,7 +60,8 @@ while [[ $# -gt 0 ]]; do
     --agent-url) AGENT_URL="$2"; shift 2;;
     --agent-file) AGENT_FILE="$2"; shift 2;;
     --agent-digest) AGENT_DIGEST="$2"; shift 2;;
-    --xray-version) XRAY_VERSION="$2"; shift 2;;
+    --xray-version) XRAY_VERSION="$2"; XRAY_VERSION_EXPLICIT=1; shift 2;;
+    --xray-force) XRAY_FORCE=1; shift;;
     --xray-file) XRAY_FILE_LOCAL="$2"; shift 2;;
     --xray-digest) XRAY_DIGEST="$2"; shift 2;;
     --force-config) FORCE_CONFIG=1; shift;;
@@ -238,10 +242,11 @@ if [[ -n "$XRAY_FILE_LOCAL" ]]; then
   run install -m 0644 /tmp/xray-extract/geosite.dat /usr/local/share/xray/geosite.dat
   run rm -rf /tmp/xray-extract
   echo "    本地 Xray 及规则数据安装完成"
-elif [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 2>&1 || [[ ! -f /usr/local/share/xray/geoip.dat ]] || [[ ! -f /usr/local/share/xray/geosite.dat ]] || [[ "$( /usr/local/bin/xray version 2>/dev/null | awk 'NR==1{print $2}' )" != "${XRAY_VERSION#v}" ]]; then
-  # 版本比对用 `xray version` 第一个输出行的第 2 个字段（严格等于，不做子串匹配，
-  # 否则 26.1 会误配 26.10.17）。旧实现只判断"文件存在且可执行"，导致
-  # --xray-version 换版本时被静默跳过（重跑安装脚本永远升不上去，必须手动删 /usr/local/bin/xray）。
+elif [[ $XRAY_FORCE -eq 1 ]] || [[ $XRAY_VERSION_EXPLICIT -eq 1 ]] || [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 2>&1; then
+  # 内核版本与 Agent 解耦（面板可在主控里自由升降级 Xray）：默认只在「未安装 / 不可执行」
+  # 或显式给出 --xray-version / --xray-force 时才下载安装；已装且可用的内核一律保留。
+  # 这样重跑安装脚本升级 Agent 时，不会把面板上选定的内核覆盖回脚本内置版本。
+  # 规则库缺失不再触发内核重装——agent 的 geo 更新器会在启动后自愈。
   case "$ARCH" in
     amd64) XRAY_ARCH="64" ;;
     arm64) XRAY_ARCH="arm64-v8a" ;;
@@ -281,7 +286,7 @@ elif [[ ! -x /usr/local/bin/xray ]] || ! /usr/local/bin/xray version >/dev/null 
     rm -rf /tmp/xray-extract "$ZIP" "${ZIP}.dgst"
   fi
 else
-  echo "==> xray 已存在，跳过下载"
+  echo "==> 已安装 xray $(/usr/local/bin/xray version 2>/dev/null | awk 'NR==1{print $2}')，保留现有内核（版本由面板管理；重装请加 --xray-force）"
 fi
 
 # ---------- 3. 写 Agent 配置 ----------
@@ -317,6 +322,17 @@ update:
   # 运行期自升级下载源（xray-agent upgrade / 面板触发共用）；
   # --agent-mirror 持久化于此。空=直连 github.com，失败自动切换内置镜像候选。
   mirror: "${AGENT_MIRROR}"
+geo:
+  # geoip.dat / geosite.dat 自动更新：agent 按 interval 拉取（默认一周）。
+  # URL 优先；URL 不可用时回退到「当前内核同版本」的官方发布包。
+  # 新文件先经 xray -test 校验再原子替换，失败保留旧文件。
+  dir: /usr/local/share/xray
+  interval: 168h
+  assets:
+    - file: geoip.dat
+      url: https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+    - file: geosite.dat
+      url: https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
 heartbeat_interval: 30s
 reconnect_max: 60s
 EOF

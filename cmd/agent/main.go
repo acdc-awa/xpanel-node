@@ -17,6 +17,7 @@ import (
 	"github.com/acdc-awa/xpanel-node/internal/agent/client"
 	"github.com/acdc-awa/xpanel-node/internal/agent/collector"
 	"github.com/acdc-awa/xpanel-node/internal/agent/config"
+	"github.com/acdc-awa/xpanel-node/internal/agent/geo"
 	"github.com/acdc-awa/xpanel-node/internal/agent/outbox"
 	"github.com/acdc-awa/xpanel-node/internal/agent/stats"
 	"github.com/acdc-awa/xpanel-node/internal/agent/upgrade"
@@ -125,6 +126,8 @@ func main() {
 	}
 
 	sysCollector := collector.New()
+	// 内核升级与 geo 兜底共用同一个 fetcher（同一镜像候选链与下载超时）。
+	xrayFetcher := upgrade.NewXrayFetcher(cfg.Update.Mirror, cfg.Update.DownloadTimeout)
 	cli := &client.Client{
 		BaseURL:         cfg.Master.URL,
 		NodeID:          cfg.Master.NodeID,
@@ -140,7 +143,8 @@ func main() {
 		CertsDir:        cfg.CertsDir,
 		Outbox:          outbox.New(cfg.OutboxPath),
 		Upgrade:         &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror, DownloadTimeout: cfg.Update.DownloadTimeout},
-		XrayUpgrade:     upgrade.NewXrayFetcher(cfg.Update.Mirror, cfg.Update.DownloadTimeout),
+		XrayUpgrade:     xrayFetcher,
+		GeoDir:          cfg.Geo.Dir,
 		SelfRestart:     selfRestart,
 	}
 
@@ -163,6 +167,20 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// 规则库自动更新：URL 优先、官方内核包兜底；配置里有 geodata.cron 时 xray 自己重读，
+	// 没有时由这里重启一次让新数据生效（仅当 xray 本来就在运行，不主动拉起已停止的进程）。
+	geoUpdater := geo.New(cfg.Geo, cfg.Xray.Bin, cfg.Xray.ConfigPath, cfg.Update.Mirror, cfg.Master.NodeID, xrayFetcher)
+	geoUpdater.Reload = func() error {
+		if !proc.IsRunning() {
+			return nil
+		}
+		if err := proc.Stop(); err != nil {
+			log.Printf("xray-agent: 规则库更新后停止 xray 失败: %v", err)
+		}
+		return proc.Start()
+	}
+	go geoUpdater.Run(ctx)
 
 	log.Printf("xray-agent 启动（node=%s, master=%s, heartbeat=%s）", cfg.Master.NodeID, cfg.Master.URL, cfg.Heartbeat)
 	cli.Run(ctx)

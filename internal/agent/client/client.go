@@ -64,6 +64,8 @@ type Client struct {
 	SelfRestart func() error
 	// XrayUpgrade xray 内核升级源（repo 恒为 XTLS/Xray-core，镜像沿用 update 段）；nil = 不支持内核替换。
 	XrayUpgrade *upgrade.XrayFetcher
+	// GeoDir 规则库目录（内核升级时从同一发布包同步 geoip.dat/geosite.dat）；空 = 默认值。
+	GeoDir string
 	// xrayVersion 当前内核版本缓存（启动时与内核替换后探测；心跳只读，不额外起进程）。
 	xrayVersion atomic.Value // string
 	// Outbox 持久化发件箱（审计 F1）：采集到的增量先落盘成不可变批次，收到主控

@@ -110,11 +110,12 @@ func (c *Client) runUpgradeXray(reqID, target string, force bool) {
 	}
 
 	report("downloading", fmt.Sprintf("正在下载 xray %s（当前 %s）…", target, fromLabel), "")
-	bin, sha, err := c.XrayUpgrade.XrayDownload(target)
+	bundle, err := c.XrayUpgrade.XrayDownloadBundle(target)
 	if err != nil {
 		fail("下载 xray 内核失败", "下载 xray 内核失败: "+err.Error())
 		return
 	}
+	bin, sha := bundle.Bin, bundle.SHA256
 	log.Printf("agent: xray %s 下载完成（sha256=%s，%d 字节）", target, sha, len(bin))
 
 	report("verifying", "正在校验下载的 xray 内核可执行性…", "")
@@ -153,6 +154,10 @@ func (c *Client) runUpgradeXray(reqID, target string, force bool) {
 	}
 	c.xrayVersion.Store(nowVersion)
 
+	// 规则库与内核来自同一个已校验压缩包，顺带同步：否则换完内核仍是安装脚本那份，
+	// 新内核新增的 geosite code 会缺失（-test 能过不代表配置引用的 code 都存在）。
+	c.syncGeoFiles(bundle)
+
 	report("restarting", fmt.Sprintf("内核已替换为 %s，正在拉起 xray…", nowVersion), "")
 	c.Xray.ResetFailures()
 	if err := c.Xray.Start(); err != nil {
@@ -183,6 +188,29 @@ func (c *Client) runUpgradeXray(reqID, target string, force bool) {
 	report("success", msg, "")
 	reply(protocol.ResultPayload{OK: true, Data: msg})
 	log.Printf("agent: %s", msg)
+}
+
+// syncGeoFiles 从内核发布包同步规则库（尽力而为：失败只记日志，不影响内核升级结果）。
+// xray 只在启动/geodata.cron 时读资产，故这一步放在拉起之前。
+func (c *Client) syncGeoFiles(bundle *upgrade.XrayBundle) {
+	dir := c.GeoDir
+	if dir == "" {
+		dir = upgrade.DefaultGeoDir
+	}
+	for _, name := range upgrade.GeoFileNames {
+		data := bundle.Geo[name]
+		if len(data) == 0 {
+			continue
+		}
+		changed, prev, err := upgrade.ReplaceGeoFile(dir, name, data)
+		if err != nil {
+			log.Printf("agent: 同步规则库 %s 失败（继续使用旧文件）: %v", name, err)
+			continue
+		}
+		if changed {
+			log.Printf("agent: 规则库 %s 已同步为 xray %s 发布包版本（%d 字节，备份 %s）", name, bundle.Tag, len(data), prev)
+		}
+	}
 }
 
 // initXrayVersion 在启动时探测一次内核版本并缓存；失败只记日志（不阻断 agent 启动）。

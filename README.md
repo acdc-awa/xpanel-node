@@ -4,7 +4,7 @@ XPanel 面板的被控节点 Agent：托管 Xray-core 进程，通过 WSS 长连
 
 - 主控仓库：**XPanel**（`github.com/acdc-awa/xpanel`）
 - 通信协议：见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（协议代码单源在 `pkg/protocol/`，主控经 go.mod 引入）
-- 锁定 Xray 版本：**v26.10.17**（Go 依赖钉 `v1.260327.1-0.20261017152356-92ccc939aaf4`）
+- 锁定 Xray 版本：**v26.10.21**（Go 依赖钉 `v1.260327.1-0.20261021115930-1b1647cd9ddf`）
   - 关于 REALITY 与 mihomo：Xray **≥26.9.8** 的服务端强制要求 ClientHello 携带 X25519MLKEM768
     keyshare，而 mihomo 默认会主动剥离它（为兼容旧服务端）。订阅侧已固定输出
     `support-x25519mlkem768: true`，因此面板签发的订阅在新内核上可直接使用；
@@ -25,6 +25,8 @@ bash <(curl -fsSL https://github.com/acdc-awa/XPanel-Node/releases/latest/downlo
 脚本完成：从本仓库 GitHub Releases 下载 agent 二进制（sha256 强制校验）→ 安装 Xray-core（官方 Releases + .dgst 校验）→ 写 `/etc/xray-agent/config.yml`（0600）→ 注册 systemd 并启动。
 
 高级选项：`--agent-version` 钉版本、`--agent-mirror` 镜像/加速前缀、`--agent-url` 完全自定义下载地址、`--agent-file` 离线本地安装、`--agent-digest` 手动摘要校验。详见 `deploy/install-agent.sh` 头部注释。
+
+Xray 内核与 Agent 版本解耦：安装脚本只在 xray 缺失/不可执行时安装内核，已装且可用的内核会保留（重跑脚本升级 Agent 不会覆盖它）。内核升级/降级由主控「服务器 → Xray 版本」操作，也可用脚本显式换版：`--xray-version vX.Y.Z` 或 `--xray-force`（按默认/指定版本重装）。
 
 ## 自升级
 

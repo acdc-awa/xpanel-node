@@ -39,6 +39,27 @@ func TestLoadValid(t *testing.T) {
 	if cfg.ReconnectMax != 60*time.Second {
 		t.Errorf("ReconnectMax = %v, want 60s 默认", cfg.ReconnectMax)
 	}
+	// 未写 geo 段时也应有默认周期与目录（资产列表为空 = 只用官方内核包）
+	if cfg.Geo.Interval != 168*time.Hour || cfg.Geo.Dir == "" {
+		t.Errorf("Geo 默认值 = %+v，期望 168h + 默认目录", cfg.Geo)
+	}
+}
+
+func TestLoadGeoSection(t *testing.T) {
+	body := fullYAML("stats:\n  api_addr: 127.0.0.1:10085\n" +
+		"geo:\n  interval: 24h\n  assets:\n" +
+		"    - file: geoip.dat\n      url: https://example.com/geoip.dat\n      sha256: abc\n")
+	cfg, err := Load(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("Load(geo) 报错: %v", err)
+	}
+	if cfg.Geo.Interval != 24*time.Hour {
+		t.Errorf("Geo.Interval = %v，期望 24h", cfg.Geo.Interval)
+	}
+	if len(cfg.Geo.Assets) != 1 || cfg.Geo.Assets[0].File != "geoip.dat" ||
+		cfg.Geo.Assets[0].SHA256 != "abc" {
+		t.Errorf("Geo.Assets 解析错误: %+v", cfg.Geo.Assets)
+	}
 }
 
 func TestLoadRejectsNonPositiveDurations(t *testing.T) {

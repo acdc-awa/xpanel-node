@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/acdc-awa/xpanel-node/internal/agent/geo"
 )
 
 // Config Agent 配置（对应 agent.yaml）。
@@ -15,6 +17,7 @@ type Config struct {
 	Xray         Xray          `yaml:"xray"`
 	Stats        Stats         `yaml:"stats"`
 	Update       Update        `yaml:"update"`
+	Geo          geo.Config    `yaml:"geo"`                // geoip.dat / geosite.dat 自动更新
 	Heartbeat    time.Duration `yaml:"heartbeat_interval"` // 心跳间隔
 	ReconnectMax time.Duration `yaml:"reconnect_max"`      // 重连退避上限
 	// Phase T：内部账户与证书
@@ -69,6 +72,7 @@ func Default() *Config {
 			CollectInterval: 30 * time.Second,
 			ReportInterval:  60 * time.Second,
 		},
+		Geo:          geo.DefaultConfig(),
 		AccountsPath: "/etc/xray-agent/internal_accounts.json",
 		CertsDir:     "/etc/xray/certs",
 		OutboxPath:   "/etc/xray-agent/traffic_outbox.json",

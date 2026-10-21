@@ -19,6 +19,10 @@ func TestXrayDownloadEndToEnd(t *testing.T) {
 	zw := zip.NewWriter(&buf)
 	w, _ := zw.Create("xray")
 	_, _ = w.Write([]byte("FAKE-XRAY-BIN"))
+	gw, _ := zw.Create("geoip.dat")
+	_, _ = gw.Write([]byte("FAKE-GEOIP"))
+	sw, _ := zw.Create("geosite.dat")
+	_, _ = sw.Write([]byte("FAKE-GEOSITE"))
 	_ = zw.Close()
 	zipData := buf.Bytes()
 	sum := Sha256Hex(zipData)
@@ -28,14 +32,23 @@ func TestXrayDownloadEndToEnd(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
+	// XrayFetcher.RequireAtom=true：模拟 GitHub 的 releases.atom（含 prerelease）。
+	mux.HandleFunc("/o/x/releases.atom", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/atom+xml")
+		fmt.Fprint(w, `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><link rel="alternate" type="text/html" href="https://github.com/o/x/releases/tag/v26.10.21"/></entry>
+</feed>`)
+	})
 	mux.HandleFunc("/o/x/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "/o/x/releases/tag/v26.10.17")
+		// 故意指向旧正式版：RequireAtom 下不应被采用
+		w.Header().Set("Location", "/o/x/releases/tag/v26.3.27")
 		w.WriteHeader(http.StatusFound)
 	})
-	mux.HandleFunc("/o/x/releases/download/v26.10.17/"+asset, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/o/x/releases/download/v26.10.21/"+asset, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	})
-	mux.HandleFunc("/o/x/releases/download/v26.10.17/"+asset+".dgst", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/o/x/releases/download/v26.10.21/"+asset+".dgst", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "MD5= abc\nSHA1= def\nSHA2-256= %s\nSHA2-512= fed\n", sum)
 	})
 	srv := httptest.NewServer(mux)
@@ -46,18 +59,24 @@ func TestXrayDownloadEndToEnd(t *testing.T) {
 	f.Repo = "o/x"
 
 	tag, err := f.Latest()
-	if err != nil || tag != "v26.10.17" {
+	if err != nil || tag != "v26.10.21" {
 		t.Fatalf("Latest = %q, %v", tag, err)
 	}
-	bin, got, err := f.XrayDownload(tag)
+	bundle, err := f.XrayDownloadBundle(tag)
 	if err != nil {
-		t.Fatalf("XrayDownload: %v", err)
+		t.Fatalf("XrayDownloadBundle: %v", err)
 	}
-	if string(bin) != "FAKE-XRAY-BIN" {
-		t.Errorf("bin = %q", bin)
+	if string(bundle.Bin) != "FAKE-XRAY-BIN" {
+		t.Errorf("bin = %q", bundle.Bin)
 	}
-	if !strings.EqualFold(got, sum) {
-		t.Errorf("sha = %s, want %s", got, sum)
+	if got := string(bundle.Geo["geoip.dat"]); got != "FAKE-GEOIP" {
+		t.Errorf("geoip = %q", got)
+	}
+	if got := string(bundle.Geo["geosite.dat"]); got != "FAKE-GEOSITE" {
+		t.Errorf("geosite = %q", got)
+	}
+	if !strings.EqualFold(bundle.SHA256, sum) {
+		t.Errorf("sha = %s, want %s", bundle.SHA256, sum)
 	}
 }
 
@@ -75,10 +94,10 @@ func TestXrayDownloadRejectsBadDigest(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/o/x/releases/download/v26.10.17/"+asset, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/o/x/releases/download/v26.10.21/"+asset, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(zipData)
 	})
-	mux.HandleFunc("/o/x/releases/download/v26.10.17/"+asset+".dgst", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/o/x/releases/download/v26.10.21/"+asset+".dgst", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "SHA2-256= %s\n", strings.Repeat("a", 64))
 	})
 	srv := httptest.NewServer(mux)
@@ -87,7 +106,7 @@ func TestXrayDownloadRejectsBadDigest(t *testing.T) {
 	f := NewXrayFetcher("", 0)
 	f.Mirrors = []string{srv.URL}
 	f.Repo = "o/x"
-	if _, _, err := f.XrayDownload("v26.10.17"); err == nil {
+	if _, _, err := f.XrayDownload("v26.10.21"); err == nil {
 		t.Fatal("摘要不符应当拒绝")
 	}
 }
@@ -99,7 +118,7 @@ func TestXrayDownloadNoDigest(t *testing.T) {
 		t.Skip(err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/o/x/releases/download/v26.10.17/"+asset, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/o/x/releases/download/v26.10.21/"+asset, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("x"))
 	})
 	srv := httptest.NewServer(mux)
@@ -108,7 +127,7 @@ func TestXrayDownloadNoDigest(t *testing.T) {
 	f := NewXrayFetcher("", 0)
 	f.Mirrors = []string{srv.URL}
 	f.Repo = "o/x"
-	if _, _, err := f.XrayDownload("v26.10.17"); err == nil {
+	if _, _, err := f.XrayDownload("v26.10.21"); err == nil {
 		t.Fatal("缺 .dgst 应当拒绝")
 	}
 }

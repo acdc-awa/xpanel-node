@@ -39,7 +39,7 @@ type HeartbeatPayload struct {
 	// 拿 DiskHash 判断磁盘是否与它记录的一致。
 	DiskHash    string `json:"disk_hash,omitempty"`
 	RunningHash string `json:"running_hash,omitempty"`
-	// XrayVersion 当前 xray 内核版本（如 "26.10.17"）。旧 agent 不填、旧主控忽略未知字段。
+	// XrayVersion 当前 xray 内核版本（如 "26.10.21"）。旧 agent 不填、旧主控忽略未知字段。
 	// 节点在启动与内核替换后探测并缓存，心跳只读缓存，不额外起进程。
 	XrayVersion string `json:"xray_version,omitempty"`
 }

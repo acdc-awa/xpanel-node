@@ -1,8 +1,9 @@
 // Package upgrade 提供 agent 自升级：版本查询/比较/下载/校验/替换（CLI 与 WS 推送共用）。
 //
-// 下载源：XPanel-Node 仓库的 GitHub Releases。版本查询走 /releases/latest 的
-// 重定向 Location（不调 REST API，规避匿名速率限制且兼容镜像站）；二进制与
-// checksums.txt 从 /releases/download/<tag>/ 拉取，sha256 必检。
+// 下载源：XPanel-Node 仓库的 GitHub Releases。版本查询优先 /releases.atom
+// （含 prerelease，不调 REST API，规避匿名速率限制且兼容镜像站），必要时回退
+// /releases/latest 的重定向 Location；二进制与 checksums.txt 从
+// /releases/download/<tag>/ 拉取，sha256 必检。
 //
 // 镜像候选链：配置的 update.mirror 置顶，其后自动落回内置候选（与 install-agent.sh
 // 的 DEFAULT_MIRRORS 同源）。逐个尝试，网络/HTTP 级失败切下一个；checksums.txt
@@ -13,6 +14,7 @@ package upgrade
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -121,6 +123,10 @@ type Fetcher struct {
 	DownloadTimeout time.Duration
 	// Client 测试注入用；非空时两个角色共用（注入方自管重定向策略）。
 	Client *http.Client
+	// RequireAtom 只认 releases.atom（包含 prerelease），不回退 /releases/latest。
+	// XTLS 自 26.4 起所有发布都标了 prerelease，/releases/latest 会退回 v26.3.27；
+	// 内核查询必须置 true，否则“最新版”会解析成很旧的正式版。
+	RequireAtom bool
 
 	once      sync.Once
 	queryCli  *http.Client // 轻请求：30s 超时，不跟随重定向（/releases/latest 靠 Location）
@@ -196,36 +202,100 @@ func (f *Fetcher) clients() (query, dl *http.Client) {
 // AssetName 当前平台的发布资产名（agent 运行于 Linux 节点，恒 linux-<arch>）。
 func AssetName() string { return "xray-agent-linux-" + runtime.GOARCH }
 
-// Latest 按候选链解析最新 release tag：GET /releases/latest 不跟随重定向，从 Location 取 tag。
+// atomFeed 只解析 releases.atom 中用得到的字段。
+type atomFeed struct {
+	Entries []struct {
+		Links []struct {
+			Href string `xml:"href,attr"`
+		} `xml:"link"`
+	} `xml:"entry"`
+}
+
+// Latest 按候选链解析最新 release tag。
+//
+// 优先 releases.atom：它包含 prerelease，且不受 REST API 匿名限流影响。
+// /releases/latest 只认非 prerelease，仅在 RequireAtom=false 时作为兜底
+// （agent 自身仓库的发布是正式版，可兜底；Xray 内核仓库全是 prerelease，必须禁用）。
 func (f *Fetcher) Latest() (string, error) {
 	query, _ := f.clients()
 	cands := f.candidates()
 	var lastErr error
 	for _, base := range cands {
-		url := base + "/" + f.repo() + "/releases/latest"
-		resp, err := query.Get(url)
-		if err != nil {
-			lastErr = err
-			log.Printf("agent-upgrade: 版本查询失败 %s: %v", base, err)
+		tag, err := f.latestFromAtom(query, base)
+		if err == nil {
+			return tag, nil
+		}
+		lastErr = err
+		log.Printf("agent-upgrade: atom 版本查询失败 %s: %v", base, err)
+		if f.RequireAtom {
 			continue
 		}
-		loc := resp.Header.Get("Location")
-		resp.Body.Close()
-		if loc == "" {
-			lastErr = fmt.Errorf("未找到最新 release（HTTP %d，无重定向）", resp.StatusCode)
-			log.Printf("agent-upgrade: 版本查询失败 %s: %v", base, lastErr)
-			continue
+		tag, err = f.latestFromRedirect(query, base)
+		if err == nil {
+			return tag, nil
 		}
-		const marker = "/releases/tag/"
-		i := strings.LastIndex(loc, marker)
-		if i < 0 || strings.TrimSpace(loc[i+len(marker):]) == "" {
-			lastErr = fmt.Errorf("无法从重定向解析版本: %s", loc)
-			log.Printf("agent-upgrade: 版本查询失败 %s: %v", base, lastErr)
-			continue
-		}
-		return strings.TrimSpace(loc[i+len(marker):]), nil
+		lastErr = err
+		log.Printf("agent-upgrade: 版本查询失败 %s: %v", base, err)
 	}
 	return "", fmt.Errorf("所有下载源均查询版本失败（共 %d 个）: %w", len(cands), lastErr)
+}
+
+// latestFromAtom 从 /releases.atom 的首个 release 条目取 tag。
+func (f *Fetcher) latestFromAtom(query *http.Client, base string) (string, error) {
+	u := base + "/" + f.repo() + "/releases.atom"
+	resp, err := query.Get(u)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	// feed 只有最近若干条，1MB 足够；限制大小防异常响应撑爆内存。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	var feed atomFeed
+	if err := xml.Unmarshal(body, &feed); err != nil {
+		return "", fmt.Errorf("解析 atom 失败: %w", err)
+	}
+	for _, e := range feed.Entries {
+		for _, l := range e.Links {
+			if tag := tagFromReleaseURL(l.Href); tag != "" {
+				return tag, nil
+			}
+		}
+	}
+	return "", errors.New("atom 中没有 release 条目")
+}
+
+// latestFromRedirect GET /releases/latest 不跟随重定向，从 Location 取 tag。
+func (f *Fetcher) latestFromRedirect(query *http.Client, base string) (string, error) {
+	u := base + "/" + f.repo() + "/releases/latest"
+	resp, err := query.Get(u)
+	if err != nil {
+		return "", err
+	}
+	loc := resp.Header.Get("Location")
+	resp.Body.Close()
+	if loc == "" {
+		return "", fmt.Errorf("未找到最新 release（HTTP %d，无重定向）", resp.StatusCode)
+	}
+	tag := tagFromReleaseURL(loc)
+	if tag == "" {
+		return "", fmt.Errorf("无法从重定向解析版本: %s", loc)
+	}
+	return tag, nil
+}
+
+func tagFromReleaseURL(href string) string {
+	const marker = "/releases/tag/"
+	i := strings.LastIndex(href, marker)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(href[i+len(marker):])
 }
 
 // Download 按候选链下载指定 tag 的资产与 checksums.txt（同一镜像取齐），返回数据与期望 sha256（hex）。

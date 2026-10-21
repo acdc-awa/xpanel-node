@@ -55,66 +55,99 @@ type XrayFetcher struct {
 // NewXrayFetcher 供 main 装配：repo 恒为 XTLS/Xray-core（内核来源不随 agent 的 update.repo 变化），
 // 但镜像候选链与下载超时沿用节点 update 段的配置。
 func NewXrayFetcher(mirror string, timeout time.Duration) *XrayFetcher {
-	return &XrayFetcher{Fetcher: Fetcher{Repo: XrayRepo, Mirror: mirror, DownloadTimeout: timeout}}
+	return &XrayFetcher{Fetcher: Fetcher{
+		Repo:            XrayRepo,
+		Mirror:          mirror,
+		DownloadTimeout: timeout,
+		// XTLS 的近期发布全部标记为 prerelease，/releases/latest 会退回 v26.3.27。
+		RequireAtom: true,
+	}}
+}
+
+// XrayBundle 一个已校验的 Xray 发布包解出的内容。
+type XrayBundle struct {
+	Bin      []byte            // xray / xray.exe
+	Geo      map[string][]byte // geoip.dat / geosite.dat（发布包里没有则为空）
+	SHA256   string            // 压缩包摘要（hex）
+	Asset    string            // 压缩包资产名（用于日志）
+	Tag      string            // 发布版本标签
+	Official bool              // 固定 true，便于调用方区分数据来源
 }
 
 // XrayDownload 按候选链下载指定版本的 Xray 压缩包，校验 sha256 后返回其中 xray 可执行文件的字节。
 // 返回的 expected 摘要仅用于日志/回执展示（校验已在内部完成）。
 func (f *XrayFetcher) XrayDownload(tag string) (bin []byte, sha string, err error) {
+	b, err := f.XrayDownloadBundle(tag)
+	if err != nil {
+		return nil, "", err
+	}
+	return b.Bin, b.SHA256, nil
+}
+
+// XrayDownloadBundle 下载并解包完整发布包（内核 + geo 数据），只走一次下载。
+// 换内核与 geo 回退共用：两者必须来自同一个已校验压缩包，不能各下一份。
+func (f *XrayFetcher) XrayDownloadBundle(tag string) (*XrayBundle, error) {
 	tag = strings.TrimSpace(tag)
 	if !TagPattern.MatchString(tag) {
-		return nil, "", fmt.Errorf("无效的 Xray 版本标签: %s", tag)
+		return nil, fmt.Errorf("无效的 Xray 版本标签: %s", tag)
 	}
 	asset, err := XrayAssetName()
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	cands := f.candidates()
 	var lastErr error
 	for _, base := range cands {
-		bin, sha, err = f.downloadXrayFrom(base, tag, asset)
+		b, err := f.downloadXrayFrom(base, tag, asset)
 		if err == nil {
-			return bin, sha, nil
+			return b, nil
 		}
 		if errors.Is(err, errBadRelease) {
 			// .dgst 已取到但解析不出摘要：release 本身有问题，换镜像无意义
-			return nil, "", err
+			return nil, err
 		}
 		lastErr = err
 		log.Printf("xray-upgrade: 下载失败 %s: %v", base, err)
 	}
-	return nil, "", fmt.Errorf("所有下载源均下载失败（共 %d 个）: %w", len(cands), lastErr)
+	return nil, fmt.Errorf("所有下载源均下载失败（共 %d 个）: %w", len(cands), lastErr)
 }
 
 // downloadXrayFrom 从单个镜像取压缩包 + .dgst，完成校验与解包。
-func (f *XrayFetcher) downloadXrayFrom(base, tag, asset string) ([]byte, string, error) {
+func (f *XrayFetcher) downloadXrayFrom(base, tag, asset string) (*XrayBundle, error) {
 	_, dl := f.clients()
 	urlBase := base + "/" + f.repo() + "/releases/download/" + tag
 
 	zipData, err := f.getBytes(dl, urlBase+"/"+asset)
 	if err != nil {
-		return nil, "", fmt.Errorf("下载 %s 失败: %w", asset, err)
+		return nil, fmt.Errorf("下载 %s 失败: %w", asset, err)
 	}
 	digest, err := f.getBytes(dl, urlBase+"/"+asset+".dgst")
 	if err != nil {
-		return nil, "", fmt.Errorf("下载 %s.dgst 失败（拒绝无校验升级）: %w", asset, err)
+		return nil, fmt.Errorf("下载 %s.dgst 失败（拒绝无校验升级）: %w", asset, err)
 	}
 	want := parseDigestSHA256(digest)
 	if want == "" {
-		return nil, "", fmt.Errorf("%w: %s.dgst 中找不到 SHA2-256 摘要（拒绝无校验升级）", errBadRelease, asset)
+		return nil, fmt.Errorf("%w: %s.dgst 中找不到 SHA2-256 摘要（拒绝无校验升级）", errBadRelease, asset)
 	}
 	got := Sha256Hex(zipData)
 	if !strings.EqualFold(want, got) {
-		return nil, "", fmt.Errorf("sha256 校验失败: 声明 %s 实际 %s", want, got)
+		return nil, fmt.Errorf("sha256 校验失败: 声明 %s 实际 %s", want, got)
 	}
 	bin, err := extractFileFromZip(zipData, "xray")
 	if err != nil {
-		return nil, "", fmt.Errorf("从 %s 解出 xray 失败: %w", asset, err)
+		return nil, fmt.Errorf("从 %s 解出 xray 失败: %w", asset, err)
 	}
 	if len(bin) == 0 {
-		return nil, "", fmt.Errorf("%w: %s 中的 xray 为空", errBadRelease, asset)
+		return nil, fmt.Errorf("%w: %s 中的 xray 为空", errBadRelease, asset)
 	}
-	return bin, got, nil
+	// geo 数据是尽力而为：老版本发布包可能没有，缺了不影响内核升级。
+	geo := make(map[string][]byte, 2)
+	for _, name := range []string{"geoip.dat", "geosite.dat"} {
+		if data, err := extractFileFromZip(zipData, name); err == nil && len(data) > 0 {
+			geo[name] = data
+		}
+	}
+	return &XrayBundle{Bin: bin, Geo: geo, SHA256: got, Asset: asset, Tag: tag, Official: true}, nil
 }
 
 // parseDigestSHA256 从 .dgst 里取 SHA-256 摘要。
@@ -179,13 +212,13 @@ func extractFileFromZip(data []byte, baseName string) ([]byte, error) {
 	return nil, fmt.Errorf("压缩包内未找到 %s", baseName)
 }
 
-// XrayVersionOf 解析 `xray version` 输出的版本号（第二列，如 "26.10.17"）。
+// XrayVersionOf 解析 `xray version` 输出的版本号（第二列，如 "26.10.21"）。
 func XrayVersionOf(output string) string {
 	fields := strings.Fields(strings.TrimSpace(output))
 	if len(fields) < 2 {
 		return ""
 	}
-	// 期望形如 "Xray 26.10.17 (Xray, Penetrates Everything.) ..."
+	// 期望形如 "Xray 26.10.21 (Xray, Penetrates Everything.) ..."
 	for i, f := range fields {
 		if strings.EqualFold(f, "xray") && i+1 < len(fields) {
 			v := fields[i+1]
