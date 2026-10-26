@@ -314,6 +314,9 @@ xray:
   config_path: /etc/xray-agent/config.json
   log_path: /var/log/xray-agent/xray.log
   pid_file: /run/xray-agent/xray.pid
+  # 日志按大小滑动：xray 的 stdout/stderr 由 agent 落盘到 log_path，超过该体积即裁掉最旧的
+  # 一半（不压缩、不留多份——日志时效性强，留最近一段够排查）。0 = 不限制（不推荐）。
+  log_max_size_mb: 20
 stats:
   api_addr: 127.0.0.1:10085
   collect_interval: 30s

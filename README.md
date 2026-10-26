@@ -40,11 +40,33 @@ xray-agent upgrade --check   # 仅检查版本
 ## 其他子命令
 
 ```bash
-xray-agent status     # 节点状态（xray 进程/配置/版本）
-xray-agent restart    # 重启 xray
-xray-agent logs       # 查看 xray 日志
-xray-agent uninstall  # 卸载（停用 systemd、清理文件）
+xray-agent                 # 裸执行：状态 + 命令面板（systemd 托管时；手动部署等于前台启动）
+xray-agent start           # 启动 agent 与它托管的 xray（后台）
+xray-agent stop            # 停止 agent 与它托管的 xray
+xray-agent status          # 节点状态（agent / xray 进程、日志占用、配置摘要）
+xray-agent restart         # 重启 agent（xray 随之重启）
+xray-agent logs            # 查看日志（-n 行数、-f 跟踪）
+xray-agent logs --size     # 只看日志占用与上限
+xray-agent logs --vacuum   # 立即把日志裁剪到上限内
+xray-agent run             # 前台运行（调试；systemd 托管时需先 stop）
+xray-agent lang en         # 切换 CLI 语言（zh / en / auto）
+xray-agent uninstall       # 卸载（停用 systemd、清理文件）
 ```
+
+`start` / `stop` 都是**后台行为**：systemd 托管时等价于 `systemctl start|stop xray-agent`；手动部署时由 CLI 自己把 `run` 拉成脱离终端的后台进程（pid 记在 xray pid 文件同目录的 `agent.pid`，自身日志写同目录 `agent.log`）。停止会先让 agent 优雅退出，由它收掉 xray 子进程，不留孤儿。
+
+## 语言
+
+CLI 默认中文，可切英文：`xray-agent lang en`（切回 `xray-agent lang zh`，清除设置 `xray-agent lang auto`）。
+语言状态写在 `/run/xray-agent/lang`（systemd 系统上 `/run` 是 tmpfs：只存内存、重启恢复默认中文），
+**不写数据库、不改 `config.yml`**。单次覆盖：`XRAY_AGENT_LANG=en xray-agent help`（环境变量优先级最高）。
+当前覆盖范围是 CLI 的界面与提示文案；agent 运行期日志仍为中文。
+
+## 日志
+
+xray 的 stdout/stderr 由 agent 通过管道接收：一边写入 `xray.log`，一边在内存里保留最近 **500 行**（主控「服务器 → 诊断 → 运行日志」直接读内存，不再每次读盘）。日志文件按大小滑动——超过 `xray.log_max_size_mb`（默认 20MB）就裁掉最旧的一半，不压缩、不留多份；手工 `truncate` 或替换文件后 agent 会自动重开新文件继续写。
+
+有人绕过 agent 手工启动 xray（`xray run -c /etc/xray-agent/config.json`）时，它的输出不经过 agent，日志不会进 `xray.log`：`status` 与面板日志顶部都会给出提示，`xray-agent restart` 可重新接管。
 
 ## 开发
 

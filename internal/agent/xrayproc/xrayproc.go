@@ -30,7 +30,13 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/acdc-awa/xpanel-node/internal/agent/logfile"
 )
+
+// DefaultLogMaxBytes 日志单文件上限默认值（20MB）：超过即按大小滑动，保留尾部一半。
+// 日志时效性强，留最近一段够排查；0 = 不限制（旧行为）。
+const DefaultLogMaxBytes = 20 << 20
 
 const (
 	// maxStartFailures 连续启动失败达到该次数即放弃自动拉起（停止永无止境的重启），
@@ -83,7 +89,9 @@ type run struct {
 	// 落到这里（writer 不是 *os.File 时 os/exec 必建管道），因此**必须持有到子进程退出为止**：
 	// 提前关闭会让拷贝 goroutine 写失败退出，os/exec 随即关掉管道读端，子进程下一次写
 	// stdout 就收到 SIGPIPE 当场死亡（见 logSink 注释）。
-	logFile *os.File
+	logFile *logfile.Sliding
+	// pid 本次拉起的 xray 进程；用于区分「agent 托管」与「别人手工启动」的 xray。
+	pid int
 }
 
 // Health xray 健康快照（心跳上报主控，面板据此显示状态与失败原因）。
@@ -101,6 +109,12 @@ type Proc struct {
 	ConfigPath string
 	LogPath    string
 	PidFile    string
+	// LogMaxBytes 日志单文件上限（0 = 不限制）。超过即按大小滑动，只留最近的一半。
+	LogMaxBytes int64
+
+	// memTail 内存日志尾部（最近 500 行）：主控 get_logs 与本地排查直接读这里，
+	// 不再每次把日志文件读进内存。由 New 初始化。
+	memTail *logTail
 
 	mu        sync.Mutex
 	run       *run
@@ -142,7 +156,14 @@ type Proc struct {
 
 // New 构造托管器。
 func New(bin, configPath, logPath, pidFile string) *Proc {
-	return &Proc{Bin: bin, ConfigPath: configPath, LogPath: logPath, PidFile: pidFile}
+	return &Proc{
+		Bin:         bin,
+		ConfigPath:  configPath,
+		LogPath:     logPath,
+		PidFile:     pidFile,
+		LogMaxBytes: DefaultLogMaxBytes,
+		memTail:     newLogTail(),
+	}
 }
 
 // testTimeout 是 xray -test 的最长等待时间；超时视为配置校验失败，
@@ -284,17 +305,29 @@ func (p *Proc) startLocked(probe bool) error {
 	if err := os.MkdirAll(filepath.Dir(p.LogPath), 0o755); err != nil {
 		return err
 	}
-	logFile, err := os.OpenFile(p.LogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	logFile, err := logfile.Open(p.LogPath, p.LogMaxBytes)
 	if err != nil {
 		return err
+	}
+	// 内存尾部先按磁盘历史播种（agent 重启后仍能一次看满最近 500 行，而不是从零开始）。
+	if p.memTail != nil && p.memTail.Empty() {
+		if text, terr := logfile.Tail(p.LogPath, memTailLines); terr == nil {
+			p.memTail.Seed(text)
+		}
 	}
 
 	cmd := exec.Command(p.Bin, "run", "-c", p.ConfigPath)
 	r := &run{tail: newRingBuffer(stderrTailBytes), exited: make(chan struct{}), logFile: logFile}
-	// stderr/stdout 同时落日志文件与环形缓冲：文件是运维现场（跨次累积），
-	// 缓冲用于把「本次启动」的致命错误摘要回传主控。logSink 保证写日志失败不会连带杀死子进程。
-	cmd.Stdout = io.MultiWriter(logSink{logFile}, r.tail)
-	cmd.Stderr = io.MultiWriter(logSink{logFile}, r.tail)
+	// stderr/stdout 同时落日志文件、本次运行的环形缓冲与跨运行的内存尾部：
+	// 文件是运维现场，环形缓冲用于回传「本次启动」的致命错误，内存尾部供主控按需拉取。
+	// logSink 保证写日志失败不会连带杀死子进程。
+	writers := []io.Writer{logSink{logFile}, r.tail}
+	if p.memTail != nil {
+		writers = append(writers, p.memTail)
+	}
+	sink := io.MultiWriter(writers...)
+	cmd.Stdout = sink
+	cmd.Stderr = sink
 	setSysProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
@@ -302,6 +335,7 @@ func (p *Proc) startLocked(probe bool) error {
 		p.noteFailureLocked(reason, time.Now(), true, probe)
 		return errors.New(reason)
 	}
+	r.pid = cmd.Process.Pid
 	p.run = r
 	p.started = true
 	p.startedAt = time.Now()
@@ -949,21 +983,67 @@ func (p *Proc) Hashes() (disk, running string) {
 	return disk, running
 }
 
-// Logs 读取最近 n 行日志。
+// Logs 返回最近 n 行日志（上限 memTailLines）。
+// 优先读内存尾部——主控每次拉日志不再把文件读进内存；agent 刚重启、内存还空时回退读盘。
 func (p *Proc) Logs(n int) (string, error) {
 	if n <= 0 {
 		n = 100
 	}
-	data, err := os.ReadFile(p.LogPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
+	if n > memTailLines {
+		n = memTailLines
+	}
+	text, ok := "", false
+	if p.memTail != nil {
+		text, ok = p.memTail.Tail(n)
+	}
+	if !ok {
+		var err error
+		text, err = logfile.Tail(p.LogPath, n)
+		if err != nil {
+			return "", err
 		}
-		return "", err
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	return p.annotateLogs(text), nil
+}
+
+// UnmanagedPIDs 列出使用本配置路径、但不是本 agent 拉起的 xray 进程。
+// 这类进程的 stdout/stderr 不经过 agent 管道，日志不会出现在 xray.log 里——
+// 面板/CLI 必须显式提示，否则运维会以为「节点没日志」。
+func (p *Proc) UnmanagedPIDs() []int {
+	p.mu.Lock()
+	own := 0
+	if p.run != nil {
+		select {
+		case <-p.run.exited:
+			// 本次进程已退出：pid 不再代表由我们托管的实例（可能已被系统复用）。
+		default:
+			own = p.run.pid
+		}
 	}
-	return strings.Join(lines, "\n"), nil
+	p.mu.Unlock()
+	var out []int
+	for _, pid := range p.ownedPIDs() {
+		if pid != own {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+// annotateLogs 在日志前加一行说明（非托管 xray 进程 / 日志为空的原因）。
+func (p *Proc) annotateLogs(text string) string {
+	pids := p.UnmanagedPIDs()
+	if len(pids) == 0 {
+		return text
+	}
+	parts := make([]string, 0, len(pids))
+	for _, pid := range pids {
+		parts = append(parts, strconv.Itoa(pid))
+	}
+	note := fmt.Sprintf("# 提示: 检测到非 agent 托管的 xray 进程 (PID %s)，其输出不经过 agent，"+
+		"以下日志可能不完整；执行 xray-agent restart 可让 agent 重新接管", strings.Join(parts, ", "))
+	if strings.TrimSpace(text) == "" {
+		return note
+	}
+	return note + "\n" + text
 }

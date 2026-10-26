@@ -11,6 +11,9 @@ xray:
   config_path: /etc/xray-agent/config.json
   log_path: /var/log/xray-agent/xray.log
   pid_file: /run/xray-agent/xray.pid
+  # 日志按大小滑动：xray 的 stdout/stderr 由 agent 落盘，超过该体积即裁掉最旧的一半
+  # （不压缩、不留多份）。0 = 不限制；不填默认 20（MB）。
+  # log_max_size_mb: 20
 
 # 以下三项可不填（代码内有默认值，install-agent.sh 也不写这三项）
 # accounts_path: /etc/xray-agent/internal_accounts.json  # relay 内部账户持久化文件

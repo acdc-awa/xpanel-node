@@ -722,6 +722,9 @@ func (c *Client) sendHeartbeat() error {
 		if v, ok := c.xrayVersion.Load().(string); ok {
 			hb.XrayVersion = v
 		}
+		// 非 agent 拉起的 xray（手工启动）：其输出不经过 agent，日志不会进 xray.log。
+		// 上报给主控，面板才能解释"节点为什么没有日志"。
+		hb.XrayUnmanaged = c.Xray.UnmanagedPIDs()
 	}
 	return c.send(protocol.MsgHeartbeat, "", hb)
 }

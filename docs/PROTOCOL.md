@@ -36,7 +36,7 @@
 | type | payload | 说明 |
 |---|---|---|
 | `auth` | AuthPayload | 首条认证消息（见 §2） |
-| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标、agent 版本、能力声明（`caps`）与 xray 健康状态（`xray_state`/`xray_last_error`/`xray_error_at`/`xray_restart_failures`，2026-09-21 新增；旧主控忽略未知字段、旧 agent 不发送） |
+| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标、agent 版本、能力声明（`caps`）与 xray 健康状态（`xray_state`/`xray_last_error`/`xray_error_at`/`xray_restart_failures`，2026-09-21 新增；`xray_unmanaged` = 非 agent 托管的 xray 进程 PID，2026-10-26 新增；旧主控忽略未知字段、旧 agent 不发送） |
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s）。带 `batch_id` 的批次，主控落库后回 `traffic_ack` |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
 | `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更上报。**主控侧已实现接收**，但节点当前不发送（内部 UUID 由 `setup_internal_account` 的 `result` 回执承载），保留类型供后续使用 |

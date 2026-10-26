@@ -39,6 +39,18 @@ type Xray struct {
 	ConfigPath string `yaml:"config_path"` // 配置落盘路径
 	LogPath    string `yaml:"log_path"`    // xray stdout/stderr 日志
 	PidFile    string `yaml:"pid_file"`    // pid 文件
+	// LogMaxSizeMB 日志单文件上限（MB）：agent 把 xray 的 stdout/stderr 写进 LogPath，
+	// 超过该体积即按大小滑动（保留尾部一半），不压缩、不留多份——日志时效性强，
+	// 留最近一段够排查。0 = 不限制（旧行为）。
+	LogMaxSizeMB int `yaml:"log_max_size_mb"`
+}
+
+// LogMaxBytes 转成字节数（0 = 不限制）。
+func (x Xray) LogMaxBytes() int64 {
+	if x.LogMaxSizeMB <= 0 {
+		return 0
+	}
+	return int64(x.LogMaxSizeMB) << 20
 }
 
 // Stats 流量采集（对应 xray 配置中的 api 段）。
@@ -62,10 +74,11 @@ func Default() *Config {
 		Heartbeat:    30 * time.Second,
 		ReconnectMax: 60 * time.Second,
 		Xray: Xray{
-			Bin:        "/usr/local/bin/xray",
-			ConfigPath: "/etc/xray-agent/config.json",
-			LogPath:    "/var/log/xray-agent/xray.log",
-			PidFile:    "/run/xray-agent/xray.pid",
+			Bin:          "/usr/local/bin/xray",
+			ConfigPath:   "/etc/xray-agent/config.json",
+			LogPath:      "/var/log/xray-agent/xray.log",
+			PidFile:      "/run/xray-agent/xray.pid",
+			LogMaxSizeMB: 20,
 		},
 		Stats: Stats{
 			APIAddr:         "127.0.0.1:10085",
@@ -97,6 +110,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Stats.APIAddr == "" {
 		return nil, fmt.Errorf("配置缺失 stats.api_addr")
+	}
+	if cfg.Xray.LogMaxSizeMB < 0 {
+		return nil, fmt.Errorf("配置无效: xray.log_max_size_mb 不能为负（0 = 不限制）")
 	}
 	// 数值域校验：duration 字段必须 > 0——0/负值会让 NewTicker 直接 panic、重连退避上限为 0 后紧密自旋
 	for _, c := range []struct {

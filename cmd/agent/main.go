@@ -4,12 +4,12 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/acdc-awa/xpanel-node/internal/agent/accounts"
@@ -25,7 +25,7 @@ import (
 )
 
 func main() {
-	// 管理子命令分派：xray-agent status|restart|logs|uninstall|help
+	// 管理子命令分派：xray-agent start|stop|status|restart|logs|upgrade|rollback|uninstall|help
 	args := os.Args[1:]
 	forcedRun := false
 	if len(args) > 0 && cli.IsSubcommand(args[0]) {
@@ -36,17 +36,18 @@ func main() {
 			os.Exit(cli.Run(args, os.Stdin, os.Stdout, os.Stderr))
 		}
 	}
+	// 非 '-' 开头又不是已知子命令的首参 = 拼写错误：交给 CLI 报「未知命令」并打帮助，
+	// 绝不能默默进主循环（那样 `xray-agent statsu` 会直接把 agent 拉起来）。
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		os.Exit(cli.Run(args, os.Stdin, os.Stdout, os.Stderr))
+	}
 
-	// 禁止裸启动第二个实例（实机互踢根因）：install-agent.sh 已装 systemd 单元时，
-	// 终端手动执行 xray-agent 直接给出管理提示退出；systemd 服务进程带 INVOCATION_ID
-	// 不受拦截，xray-agent run 仍可强制前台运行（调试/临时场景）。
-	if !forcedRun && !cli.IsSystemdService() && cli.IsSystemdManaged() {
-		fmt.Fprintln(os.Stderr, "xray-agent 已由 systemd 服务托管，请用 systemctl 管理：")
-		fmt.Fprintln(os.Stderr, "  systemctl status xray-agent      查看运行状态")
-		fmt.Fprintln(os.Stderr, "  systemctl restart xray-agent     重启服务")
-		fmt.Fprintln(os.Stderr, "  journalctl -u xray-agent         查看日志")
-		fmt.Fprintln(os.Stderr, "如需临时前台运行：先 systemctl stop xray-agent，再执行 xray-agent run")
-		os.Exit(0)
+	// 禁止裸启动第二个实例（实机互踢根因）：installed 了 systemd 单元时，终端裸执行
+	// `xray-agent` 打印状态 + 命令面板后退出（旧实现只打一句"已由 systemd 托管"，毫无信息量）；
+	// systemd 服务进程带 INVOCATION_ID 不受影响，xray-agent run 仍可强制前台运行（调试/临时场景）。
+	// 带任何参数（如 -config）都视为"确实想跑"，直接进主循环。
+	if !forcedRun && len(os.Args) == 1 && !cli.IsSystemdService() && cli.IsSystemdManaged() {
+		os.Exit(cli.Dashboard(os.Stdout))
 	}
 
 	cfgPath := flag.String("config", "", "配置文件路径（默认探测 /etc/xray-agent/config.yml、二进制同目录下的 agent.yaml、或 ./agent.yaml）")
@@ -76,7 +77,18 @@ func main() {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
+	// 手动安装的后台模式（xray-agent start 拉起）：自身日志落到 agent.log，
+	// 与 xray 日志共用同一套大小滑动策略——否则这里又会出现一个无人管理的日志文件。
+	if lp := os.Getenv(cli.AgentLogEnv); lp != "" {
+		if closer, lerr := cli.SetupAgentLog(lp, cfg.Xray.LogMaxBytes()); lerr != nil {
+			log.Printf("xray-agent: 打开自身日志失败（继续写 stderr）: %v", lerr)
+		} else {
+			defer closer.Close()
+		}
+	}
+
 	proc := xrayproc.New(cfg.Xray.Bin, cfg.Xray.ConfigPath, cfg.Xray.LogPath, cfg.Xray.PidFile)
+	proc.LogMaxBytes = cfg.Xray.LogMaxBytes()
 	proc.CleanupStale()
 
 	// 自举：无配置时写入内嵌最小模板（log + api gRPC inbound(127.0.0.1:10085) + stats 等），

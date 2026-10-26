@@ -42,6 +42,10 @@ type HeartbeatPayload struct {
 	// XrayVersion 当前 xray 内核版本（如 "26.10.21"）。旧 agent 不填、旧主控忽略未知字段。
 	// 节点在启动与内核替换后探测并缓存，心跳只读缓存，不额外起进程。
 	XrayVersion string `json:"xray_version,omitempty"`
+	// XrayUnmanaged 使用本节点配置路径、但不是 agent 拉起的 xray 进程 PID。
+	// 这类进程的 stdout/stderr 不经过 agent 管道，日志不会出现在 get_logs 里
+	// （面板上表现为"节点没日志"）。旧 agent 不填（nil）、旧主控忽略未知字段。
+	XrayUnmanaged []int `json:"xray_unmanaged,omitempty"`
 }
 
 // OnlineUserIPs 单个用户当前活跃连接的去重源 IP（refcount 快照，连接断开即移除；
