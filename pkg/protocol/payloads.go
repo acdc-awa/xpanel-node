@@ -149,7 +149,8 @@ type User struct {
 	Email string `json:"email"`
 	Flow  string `json:"flow,omitempty"`
 	Level uint32 `json:"level,omitempty"`
-	Limit int    `json:"limit,omitempty"` // 最大在线设备数限制
+	// 设备数限制字段已于 2026-10-27 下线（Xray 无按 IP/连接掐断能力，字段从未生效）；
+	// 旧主控若仍下发 limit，新节点按未知字段忽略。
 	// CycleID 该用户当前账期 ID（≥1）：节点收到与本地记录不同的值即视为发生周期切换，
 	// 立刻做一次采集把切换前的增量按旧账期封账（见 TrafficEntry.CycleID）。
 	// 0 = 旧主控未下发（节点不做切换处理，按未知账期上报）。
