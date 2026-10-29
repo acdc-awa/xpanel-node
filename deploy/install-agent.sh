@@ -14,7 +14,7 @@
 #   --agent-url <url>    完全自定义 agent 二进制下载地址（优先于 version/mirror 推导）
 #   --agent-file <path>  本地 agent 二进制（离线/scp 场景，优先于一切下载）
 #   --agent-digest <sha> 期望的 agent 二进制 sha256（提供则强制校验，不匹配拒绝安装）
-#   --xray-version <v>   xray 版本（默认 v26.10.21；仅首次安装或显式指定时使用）
+#   --xray-version <v>   xray 版本（默认 v26.10.31；仅首次安装或显式指定时使用）
 #   --xray-force         强制按 --xray-version 重装内核（面板已支持自由升降级，通常无需本参数）
 #   --xray-file <path>   本地 xray 压缩包（Xray-linux-*.zip，完全离线安装场景）
 #   --xray-digest <sha>  期望的 xray 压缩包 sha256（提供则强制校验）
@@ -35,7 +35,7 @@ AGENT_MIRROR=""
 AGENT_URL=""
 AGENT_FILE=""
 AGENT_DIGEST=""
-XRAY_VERSION="v26.10.21"
+XRAY_VERSION="v26.10.31"
 XRAY_VERSION_EXPLICIT=0
 XRAY_FORCE=0
 XRAY_FILE_LOCAL=""

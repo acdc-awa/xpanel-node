@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/xtls/xray-core v1.260327.1-0.20261021115930-1b1647cd9ddf
+	github.com/xtls/xray-core v1.260327.1-0.20261031132019-a4a3dff5b20c
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
@@ -19,7 +19,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/miekg/dns v1.1.73 // indirect
-	github.com/pires/go-proxyproto v0.15.0 // indirect
+	github.com/pires/go-proxyproto v0.16.0 // indirect
 	github.com/refraction-networking/utls v1.8.3-0.20260301010127-aa6edf4b11af // indirect
 	github.com/xtls/reality v0.0.0-20261014101318-83f621788ca8 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect

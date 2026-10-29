@@ -4,7 +4,13 @@ XPanel 面板的被控节点 Agent：托管 Xray-core 进程，通过 WSS 长连
 
 - 主控仓库：**XPanel**（`github.com/acdc-awa/xpanel`）
 - 通信协议：见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（协议代码单源在 `pkg/protocol/`，主控经 go.mod 引入）
-- 锁定 Xray 版本：**v26.10.21**（Go 依赖钉 `v1.260327.1-0.20261021115930-1b1647cd9ddf`）
+- 锁定 Xray 版本：**v26.10.31**（Go 依赖钉 `v1.260327.1-0.20261031132019-a4a3dff5b20c`）
+  - 26.10.31 是紧急安全更新：默认关闭 MPTCP（Linux 内核监听 IPv4 MPTCP 存在远程提权，而 Go 1.24+ 默认开启）。
+    **v26.10.29 已被上游撤版**，节点应尽快升到 26.10.31。
+  - 26.10.29 相对 26.10.21 的两条关键差异：①freedom `blockDelay` 对 DispatchLink 型入站
+    （VLESS/Hysteria）终于生效——此前黑洞延迟形同虚设，客户端连接会一直挂到自身超时；
+    ②VLESS 出站不带 TLS/vlessenc 时，只认 Go 口径的私网（RFC1918 / 回环 / 链路本地），
+    `100.64.0.0/10`（CGNAT、Tailscale）、`198.18.0.0/15`、`192.0.0.0/24` 等特殊段不再放行。
   - 关于 REALITY 与 mihomo：Xray **≥26.9.8** 的服务端强制要求 ClientHello 携带 X25519MLKEM768
     keyshare，而 mihomo 默认会主动剥离它（为兼容旧服务端）。订阅侧已固定输出
     `support-x25519mlkem768: true`，因此面板签发的订阅在新内核上可直接使用；
