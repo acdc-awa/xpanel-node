@@ -706,6 +706,13 @@ func (c *Client) sendHeartbeat() error {
 		Caps:        []string{protocol.CapPushCA, protocol.CapSyncCerts},
 		TS:          time.Now().Unix(),
 	}
+	if snap.ConnOK {
+		hb.Conns = &protocol.ConnStatsPayload{
+			TCPEstablished: snap.ConnTCPEstablished,
+			TCPTotal:       snap.ConnTCPTotal,
+			UDP:            snap.ConnUDP,
+		}
+	}
 	// xray 起不来时把状态与原因带回主控（面板据此显示"为什么没起来"），
 	// 成功启动后 Failures 归零、LastError 作为"最近一次失败"淡显保留。
 	if c.Xray != nil {

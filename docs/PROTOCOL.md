@@ -36,7 +36,7 @@
 | type | payload | 说明 |
 |---|---|---|
 | `auth` | AuthPayload | 首条认证消息（见 §2） |
-| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标、agent 版本、能力声明（`caps`）与 xray 健康状态（`xray_state`/`xray_last_error`/`xray_error_at`/`xray_restart_failures`，2026-09-21 新增；`xray_unmanaged` = 非 agent 托管的 xray 进程 PID，2026-10-26 新增；旧主控忽略未知字段、旧 agent 不发送） |
+| `heartbeat` | HeartbeatPayload | 周期心跳（默认 30s），携带系统指标、agent 版本、能力声明（`caps`）与 xray 健康状态（`xray_state`/`xray_last_error`/`xray_error_at`/`xray_restart_failures`，2026-09-21 新增；`xray_unmanaged` = 非 agent 托管的 xray 进程 PID，2026-10-26 新增；`conns` = 整机 TCP/UDP 连接数快照，2026-11-01 新增；旧主控忽略未知字段、旧 agent 不发送） |
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s）。带 `batch_id` 的批次，主控落库后回 `traffic_ack` |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
 | `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更上报。**主控侧已实现接收**，但节点当前不发送（内部 UUID 由 `setup_internal_account` 的 `result` 回执承载），保留类型供后续使用 |
@@ -70,7 +70,11 @@ HeartbeatPayload   { cpu, mem, mem_total, disk, disk_total, xray_running,
                      rx_rate, tx_rate, rx_bytes, tx_bytes,
                      version?,  // agent 版本（v0.1.0+；旧 agent 不上报）
                      caps?,     // 节点能力声明（数组；旧 agent 不发）。当前：push_ca / sync_certs
+                     conns?,    // 连接数快照（2026-11-01；旧 agent 不发、旧主控忽略未知字段）
                      ts }       // unix 秒
+// conns: ConnStatsPayload { tcp_established, tcp_total, udp } —— 节点整机内核连接表读数。
+// tcp_total 不含 LISTEN（含 TIME_WAIT 等残留）；udp 是绑定 socket 数而不是会话数。
+// 字段缺省（nil）= 采集不了/未上报，与「确实 0 连接」区分，主控据此决定是否展示。
 // online_ips: OnlineUserIPs { email, ips }[] —— xray GetUsersStats 快照，
 // 仅含当前有活跃连接的用户；连接断开即移除（refcount，无宽限期）。
 // 前提：主控下发配置的 policy.levels.0.statsUserOnline = true（模板已默认开启）。

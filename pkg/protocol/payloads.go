@@ -46,6 +46,18 @@ type HeartbeatPayload struct {
 	// 这类进程的 stdout/stderr 不经过 agent 管道，日志不会出现在 get_logs 里
 	// （面板上表现为"节点没日志"）。旧 agent 不填（nil）、旧主控忽略未知字段。
 	XrayUnmanaged []int `json:"xray_unmanaged,omitempty"`
+	// Conns 连接数快照（2026-11-01 新增，整机口径）。用指针区分「平台不支持/旧 agent 不上报」
+	// 与「节点确实 0 连接」——旧 agent 不发该字段（nil），旧主控忽略未知字段。
+	Conns *ConnStatsPayload `json:"conns,omitempty"`
+}
+
+// ConnStatsPayload 节点内核连接表快照。
+//
+// TCPTotal 不含 LISTEN；UDP 是绑定 socket 数而不是会话数（一条 QUIC socket 承载多会话）。
+type ConnStatsPayload struct {
+	TCPEstablished int `json:"tcp_established"`
+	TCPTotal       int `json:"tcp_total"`
+	UDP            int `json:"udp"`
 }
 
 // OnlineUserIPs 单个用户当前活跃连接的去重源 IP（refcount 快照，连接断开即移除；

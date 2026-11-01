@@ -22,6 +22,12 @@ type Snapshot struct {
 	TxBytes   uint64  // 物理网卡发送总字节
 	RxRate    float64 // 入口带宽速率（字节/秒）
 	TxRate    float64 // 出口带宽速率（字节/秒）
+
+	// 连接数（整机口径，读内核连接表；非 Linux 平台 ConnOK=false 表示不支持）
+	ConnTCPEstablished int  // TCP 已建立连接数
+	ConnTCPTotal       int  // TCP 表项总数（不含 LISTEN，含 TIME_WAIT 等残留）
+	ConnUDP            int  // UDP 绑定 socket 数（不是会话数）
+	ConnOK             bool // 本平台是否支持采集连接数
 }
 
 // Collector 通过 /proc 采集。
@@ -45,7 +51,20 @@ type Collector struct {
 	lastSecTx  uint64
 	lastSecAt  time.Time
 	haveSec    bool
+
+	// 连接数缓存（独立锁：采样在 mu 之外进行，避免拖住 1 秒级网速采样）。
+	// 心跳最低可配到 3s，而繁忙节点的 /proc/net/tcp 可达数 MB，故按 connSampleInterval 抽样。
+	connMu    sync.Mutex
+	connAt    time.Time
+	connEst   int
+	connTotal int
+	connUDP   int
+	connOK    bool
 }
+
+// connSampleInterval 连接数最小采样间隔。连接规模是慢变量，10s 足够，
+// 但能把「3s 心跳 × 几 MB 的 /proc 表」的读取压力降到 1/3。
+const connSampleInterval = 10 * time.Second
 
 // New 构造采集器。
 func New() *Collector {
@@ -118,10 +137,13 @@ func (c *Collector) sampleLoop() {
 
 // Snapshot 采集当前快照（CPU 为自上次调用以来的均值，网速结合瞬时/峰值防稀释）。
 func (c *Collector) Snapshot() Snapshot {
+	now := time.Now()
+	// 连接数在锁外采样（可能流式扫描几 MB 的 /proc 表），不阻塞 1 秒级网速采样
+	connEst, connTotal, connUDP, connOK := c.connSnapshot(now)
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	now := time.Now()
 	snap := Snapshot{}
 	snap.Mem, snap.MemTotal = memInfo()
 	snap.Disk, snap.DiskTotal = diskInfo("/")
@@ -174,7 +196,26 @@ func (c *Collector) Snapshot() Snapshot {
 	c.peakRxRate = 0
 	c.peakTxRate = 0
 
+	// 连接数：读内核连接表（Linux /proc/net），非 Linux 平台标记不支持
+	snap.ConnTCPEstablished = connEst
+	snap.ConnTCPTotal = connTotal
+	snap.ConnUDP = connUDP
+	snap.ConnOK = connOK
+
 	return snap
+}
+
+// connSnapshot 返回缓存的连接数；距上次采样超过 connSampleInterval 才真正读 /proc。
+func (c *Collector) connSnapshot(now time.Time) (est, total, udp int, ok bool) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if !c.connAt.IsZero() && now.Sub(c.connAt) < connSampleInterval {
+		return c.connEst, c.connTotal, c.connUDP, c.connOK
+	}
+	est, total, udp, ok = connStats()
+	c.connAt = now
+	c.connEst, c.connTotal, c.connUDP, c.connOK = est, total, udp, ok
+	return est, total, udp, ok
 }
 
 // cpuTicks 读取 /proc/stat 的 cpu 行 ticks。
