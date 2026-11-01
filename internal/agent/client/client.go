@@ -715,7 +715,7 @@ func (c *Client) metricsLoop(ctx context.Context, ws *websocket.Conn) {
 
 // sendMetrics 组装并发送一帧快车道指标。
 func (c *Client) sendMetrics(ctx context.Context) error {
-	snap := c.Collector.Snapshot()
+	snap := c.Collector.RealtimeSnapshot()
 	m := protocol.MetricsPayload{
 		CPU:         snap.CPU,
 		RxRate:      snap.RxRate,
@@ -745,7 +745,14 @@ func (c *Client) sendMetrics(ctx context.Context) error {
 // 主控声明 metrics_split 时只发慢字段（内存/磁盘/在线名单/版本/状态/配置哈希）；
 // 实时字段（CPU/网速/连接数）挪到快车道，见 sendMetrics。
 func (c *Client) sendHeartbeat() error {
-	snap := c.Collector.Snapshot()
+	// CPU/网速的差分基线只允许一个写入方：快车道模式下心跳不碰它（取绝对值类指标），
+	// 否则两个循环撞在同一毫秒时，后到的一方只有亚毫秒窗口，jiffy 量化会把 CPU 报成 100% 或 0%。
+	var snap collector.Snapshot
+	if c.metricsMode.Load() {
+		snap = c.Collector.SystemSnapshot()
+	} else {
+		snap = c.Collector.RealtimeSnapshot()
+	}
 	xrayRunning := c.Xray.IsRunning()
 	onlineUsers := 0
 	var onlineIPs []protocol.OnlineUserIPs

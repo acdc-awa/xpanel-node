@@ -32,14 +32,18 @@ type Snapshot struct {
 
 // Collector 通过 /proc 采集。
 type Collector struct {
-	mu        sync.Mutex
-	prevIdle  float64
-	prevTotal float64
-	havePrev  bool
-	prevTime  time.Time
-	prevRx    uint64
-	prevTx    uint64
-	haveNet   bool
+	mu          sync.Mutex
+	prevIdle    float64
+	prevTotal   float64
+	havePrev    bool
+	prevCPUTime time.Time
+	lastCPU     float64 // 最近一次有效 CPU 值：短窗口调用直接复用它，不重算差分
+	prevRx      uint64
+	prevTx      uint64
+	prevNetTime time.Time
+	haveNet     bool
+	lastRxRate  float64 // 最近一次有效网速（同上）
+	lastTxRate  float64
 
 	// 1秒级网速高频采样（防止长心跳窗口平均除法稀释瞬时尖峰）
 	stopCh     chan struct{}
@@ -135,74 +139,140 @@ func (c *Collector) sampleLoop() {
 	}
 }
 
-// Snapshot 采集当前快照（CPU 为自上次调用以来的均值，网速结合瞬时/峰值防稀释）。
-func (c *Collector) Snapshot() Snapshot {
-	now := time.Now()
-	// 连接数在锁外采样（可能流式扫描几 MB 的 /proc 表），不阻塞 1 秒级网速采样
-	connEst, connTotal, connUDP, connOK := c.connSnapshot(now)
+// minDeltaWindow 差分类指标（CPU / 网速）的最短有效采样窗口。
+//
+// 低于它时 /proc/stat 的 jiffy 量化会主导结果：2 vCPU / 100Hz 下 1ms 只推进 0.2 个 jiffy，
+// dTotal 只能是 0 或 1，而推进的那 1 个 jiffy 往往正是采样器自己刚烧掉的忙 tick ——
+// (1 - 0/1)*100 直接把 CPU 报成 100%（dTotal=0 时则报成 0%）。
+// 窗口不足时沿用上一帧的值，并且**不更新基线**，让下一个正常窗口照常对齐。
+const minDeltaWindow = 1 * time.Second
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// /proc 读取与时钟的接缝，仅用于测试注入（生产恒为真实实现）。
+var (
+	cpuTicksFn   = cpuTicks
+	netDevInfoFn = netDevInfo
+	nowFn        = time.Now
+)
 
+// SystemSnapshot 只采集绝对值类指标（内存 / 磁盘 / 连接数），不碰任何差分基线。
+//
+// 快车道（metrics_split）模式下心跳走这里：CPU 与网速的差分基线只允许
+// RealtimeSnapshot 一个写入方。两个循环共用一个基线时，后到的一方窗口被压缩到
+// 亚毫秒，量化误差会产出 100% / 0% 的伪值（见 minDeltaWindow）。
+func (c *Collector) SystemSnapshot() Snapshot {
 	snap := Snapshot{}
 	snap.Mem, snap.MemTotal = memInfo()
 	snap.Disk, snap.DiskTotal = diskInfo("/")
-	if idle, total, ok := cpuTicks(); ok {
-		if c.havePrev {
-			dIdle := idle - c.prevIdle
-			dTotal := total - c.prevTotal
-			if dTotal > 0 {
-				snap.CPU = (1 - dIdle/dTotal) * 100
-				if snap.CPU < 0 {
-					snap.CPU = 0
-				}
-			}
+	c.fillConns(&snap)
+	return snap
+}
+
+// RealtimeSnapshot 采集实时差分指标（CPU 为自上次调用以来的均值，网速结合瞬时/峰值防稀释），
+// 并附带绝对值类指标。它是 CPU 与网速差分基线**唯一**的写入方。
+func (c *Collector) RealtimeSnapshot() Snapshot {
+	snap := Snapshot{}
+	snap.Mem, snap.MemTotal = memInfo()
+	snap.Disk, snap.DiskTotal = diskInfo("/")
+
+	now := nowFn()
+	c.mu.Lock()
+	c.cpuDelta(now, &snap)
+	c.netDelta(now, &snap)
+	c.mu.Unlock()
+
+	c.fillConns(&snap)
+	return snap
+}
+
+// Snapshot 兼容入口：一次取全体指标。旧主控（未协商快车道）下心跳仍用它，
+// 此时它是唯一的差分写入方，行为与拆分前一致。
+func (c *Collector) Snapshot() Snapshot {
+	return c.RealtimeSnapshot()
+}
+
+// fillConns 填入连接数（内部按 connSampleInterval 缓存，两个入口都调用也不会重复读表）。
+func (c *Collector) fillConns(snap *Snapshot) {
+	est, total, udp, ok := c.connSnapshot(time.Now())
+	snap.ConnTCPEstablished = est
+	snap.ConnTCPTotal = total
+	snap.ConnUDP = udp
+	snap.ConnOK = ok
+}
+
+// cpuDelta 计算 CPU 百分比（调用方需持有 c.mu）。
+func (c *Collector) cpuDelta(now time.Time, snap *Snapshot) {
+	idle, total, ok := cpuTicksFn()
+	if !ok {
+		snap.CPU = c.lastCPU
+		return
+	}
+	if !c.havePrev {
+		c.prevIdle, c.prevTotal, c.havePrev, c.prevCPUTime = idle, total, true, now
+		snap.CPU = c.lastCPU
+		return
+	}
+	if now.Sub(c.prevCPUTime) < minDeltaWindow {
+		snap.CPU = c.lastCPU
+		return
+	}
+	if dIdle, dTotal := idle-c.prevIdle, total-c.prevTotal; dTotal > 0 {
+		cpu := (1 - dIdle/dTotal) * 100
+		switch {
+		case cpu < 0:
+			cpu = 0
+		case cpu > 100:
+			cpu = 100
 		}
-		c.prevIdle, c.prevTotal, c.havePrev = idle, total, true
+		c.lastCPU = cpu
+	}
+	c.prevIdle, c.prevTotal, c.prevCPUTime = idle, total, now
+	snap.CPU = c.lastCPU
+}
+
+// netDelta 计算网速（调用方需持有 c.mu）。
+func (c *Collector) netDelta(now time.Time, snap *Snapshot) {
+	rx, tx, ok := netDevInfoFn()
+	if !ok {
+		snap.RxRate, snap.TxRate = c.lastRxRate, c.lastTxRate
+		return
+	}
+	// 累计字节是绝对值，任何窗口都可以照发
+	snap.RxBytes, snap.TxBytes = rx, tx
+
+	if !c.haveNet {
+		c.prevRx, c.prevTx, c.haveNet, c.prevNetTime = rx, tx, true, now
+		snap.RxRate, snap.TxRate = c.lastRxRate, c.lastTxRate
+		return
+	}
+	if now.Sub(c.prevNetTime) < minDeltaWindow {
+		// 窗口过短：不重算，也不复位峰值（否则会截断本轮的峰值跟踪）
+		snap.RxRate, snap.TxRate = c.lastRxRate, c.lastTxRate
+		return
 	}
 
-	rx, tx, ok := netDevInfo()
-	if ok {
-		snap.RxBytes = rx
-		snap.TxBytes = tx
-		if c.haveNet && !c.prevTime.IsZero() {
-			dt := now.Sub(c.prevTime).Seconds()
-			if dt > 0 {
-				var avgRx, avgTx float64
-				if rx >= c.prevRx {
-					avgRx = float64(rx-c.prevRx) / dt
-				}
-				if tx >= c.prevTx {
-					avgTx = float64(tx-c.prevTx) / dt
-				}
-				// 实时速率优先取瞬时高频值或峰值，避免被心跳大窗口平均除法稀释
-				snap.RxRate = math.Max(avgRx, c.instRxRate)
-				snap.TxRate = math.Max(avgTx, c.instTxRate)
-				if c.peakRxRate > snap.RxRate {
-					snap.RxRate = c.peakRxRate
-				}
-				if c.peakTxRate > snap.TxRate {
-					snap.TxRate = c.peakTxRate
-				}
-			}
-		}
-		c.prevRx = rx
-		c.prevTx = tx
-		c.prevTime = now
-		c.haveNet = true
+	dt := now.Sub(c.prevNetTime).Seconds()
+	var avgRx, avgTx float64
+	if rx >= c.prevRx {
+		avgRx = float64(rx-c.prevRx) / dt
 	}
+	if tx >= c.prevTx {
+		avgTx = float64(tx-c.prevTx) / dt
+	}
+	// 实时速率优先取瞬时高频值或峰值，避免被大窗口平均除法稀释
+	snap.RxRate = math.Max(avgRx, c.instRxRate)
+	snap.TxRate = math.Max(avgTx, c.instTxRate)
+	if c.peakRxRate > snap.RxRate {
+		snap.RxRate = c.peakRxRate
+	}
+	if c.peakTxRate > snap.TxRate {
+		snap.TxRate = c.peakTxRate
+	}
+	c.lastRxRate, c.lastTxRate = snap.RxRate, snap.TxRate
+	c.prevRx, c.prevTx, c.prevNetTime = rx, tx, now
 
-	// 重置窗口峰值，开始下一个心跳周期的峰值跟踪
+	// 重置窗口峰值，开始下一个采样周期的峰值跟踪
 	c.peakRxRate = 0
 	c.peakTxRate = 0
-
-	// 连接数：读内核连接表（Linux /proc/net），非 Linux 平台标记不支持
-	snap.ConnTCPEstablished = connEst
-	snap.ConnTCPTotal = connTotal
-	snap.ConnUDP = connUDP
-	snap.ConnOK = connOK
-
-	return snap
 }
 
 // connSnapshot 返回缓存的连接数；距上次采样超过 connSampleInterval 才真正读 /proc。
