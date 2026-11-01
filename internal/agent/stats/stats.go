@@ -221,23 +221,22 @@ type RateSample struct {
 //   - **不复用 Collect 的基线与锁**：那边每消费一次就推进 c.last，被第二方读一次就吃掉
 //     计费增量（漏账）。这里自带 rateLast/rateAt 与专用 gRPC 连接，计费链路零影响。
 //   - **只读**：QueryStats 固定 Reset_=false，绝不清零 xray 计数器。
-//   - **只采在线用户**：离线用户速率恒为 0，没有传输价值；在线名单来自后台在线快照
-//     （零额外 RPC），快照超龄（xray 卡死）时直接不采，宁可空也不给冻结读数。
+//   - **采集范围 = 在线用户 ∪ 本帧有增量的用户**：在线名单来自后台在线快照（零额外 RPC），
+//     让空闲但仍在线的用户保留一行 0 速率、面板不闪烁；同时并入本帧计数器有增量的用户，
+//     因为 xray 的 OnlineMap 明确忽略回环地址（app/stats/online_map.go 的 AddIP 对
+//     127.0.0.1/[::1] 直接 return），纯本机联调/回环转发的场景在线名单恒为空——只看在线
+//     名单会让「明明在跑流量却一条速率都没有」。快照超龄（xray 卡死）时按空集处理，
+//     仍由增量提供数据，宁可少一行也不给冻结读数。
 //
 // 速率 = (本次累计值 − 上次累计值) ÷ 两次采样的真实间隔。首帧只建基线；计数器新出现或
 // xray 重启归零（值变小）时本帧记 0 并重建基线，避免把历史总量当成一秒的流量。
 // 调用方必须串行（metricsLoop 单 goroutine）。
 func (c *Collector) SampleRates(ctx context.Context) []RateSample {
-	snap := c.online.Load()
-	if snap == nil || snap.at.IsZero() || time.Since(snap.at) > maxOnlineStale {
-		return nil
-	}
-	online := make(map[string]struct{}, len(snap.users))
-	for _, u := range snap.users {
-		online[u.Email] = struct{}{}
-	}
-	if len(online) == 0 {
-		return nil
+	online := make(map[string]struct{})
+	if snap := c.online.Load(); snap != nil && !snap.at.IsZero() && time.Since(snap.at) <= maxOnlineStale {
+		for _, u := range snap.users {
+			online[u.Email] = struct{}{}
+		}
 	}
 
 	if c.rateCli == nil {
@@ -313,6 +312,25 @@ func (c *Collector) applyRateDeltas(stat []*statsService.Stat, dt float64, onlin
 
 	out := make([]RateSample, 0, len(online))
 	for email := range online {
+		out = append(out, RateSample{Email: email, Up: up[email], Down: down[email]})
+	}
+	// 本帧有增量但不在在线快照里的用户（回环客户端、在线快照滞后/超龄）也要报，
+	// 否则「有流量却零速率」。已在在线名单里的用户跳过，避免重复。
+	active := make(map[string]struct{}, len(up)+len(down))
+	for email, rate := range up {
+		if rate > 0 {
+			active[email] = struct{}{}
+		}
+	}
+	for email, rate := range down {
+		if rate > 0 {
+			active[email] = struct{}{}
+		}
+	}
+	for email := range active {
+		if _, ok := online[email]; ok {
+			continue
+		}
 		out = append(out, RateSample{Email: email, Up: up[email], Down: down[email]})
 	}
 	// 固定顺序（按统计键字典序）：帧内容可复现，便于排查与测试比对
