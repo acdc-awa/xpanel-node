@@ -8,7 +8,12 @@ type AuthPayload struct {
 	Secret string `json:"secret"`
 }
 
-// HeartbeatPayload 心跳与节点状态。
+// HeartbeatPayload 心跳与节点状态（慢车道，默认 30s）。
+//
+// 2026-11-01 起按车道拆分：主控声明 CapMetricsSplit 时，CPU / RxRate / TxRate /
+// RxBytes / TxBytes / Conns 改由 MetricsPayload 承载，本结构里这些字段不再填（旧主控
+// 不会声明该能力，因此收到的仍是全集）。XrayRunning 是例外——两车道都填：主控靠它
+// 判断「进程不在就清空在线名单」，缺字段会被反序列化成 false 而误清。
 type HeartbeatPayload struct {
 	CPU         float64         `json:"cpu"`                  // 百分比
 	Mem         float64         `json:"mem"`                  // 已用内存（字节）
@@ -58,6 +63,33 @@ type ConnStatsPayload struct {
 	TCPEstablished int `json:"tcp_established"`
 	TCPTotal       int `json:"tcp_total"`
 	UDP            int `json:"udp"`
+}
+
+// MetricsPayload 快车道实时指标（2026-11-01，节点→主控，默认 3s 一帧）。
+//
+// 只有主控在 auth_ok 里声明 CapMetricsSplit 时才会收到本帧；同一批字段届时不再在
+// HeartbeatPayload 里重复发送（`xray_running` 例外：慢车道保留，见 HeartbeatPayload）。
+// 本帧可丢：每一帧都是全量快照，主控就地覆盖，丢一帧只损失一个采样点。
+type MetricsPayload struct {
+	CPU         float64 `json:"cpu"`
+	RxRate      float64 `json:"rx_rate"`
+	TxRate      float64 `json:"tx_rate"`
+	RxBytes     uint64  `json:"rx_bytes"`
+	TxBytes     uint64  `json:"tx_bytes"`
+	XrayRunning bool    `json:"xray_running"`
+	// Conns 整机连接数（同 HeartbeatPayload.Conns）。nil = 平台不支持（非 Linux）。
+	Conns *ConnStatsPayload `json:"conns,omitempty"`
+	// UserRates 每（用户, 入站）的瞬时速率：统计键 u<uid>.i<iid>@panel.local 携带两维，
+	// 主控据此反解归属。只含在线用户（离线用户速率为 0、没有传输价值）。
+	UserRates []UserRatePayload `json:"user_rates,omitempty"`
+	TS        int64             `json:"ts"` // unix 秒
+}
+
+// UserRatePayload 单个统计键的瞬时速率（字节/秒，两帧累计计数器之差 ÷ 真实帧间隔）。
+type UserRatePayload struct {
+	Email string  `json:"email"` // u<uid>.i<iid>@panel.local
+	Up    float64 `json:"up"`
+	Down  float64 `json:"down"`
 }
 
 // OnlineUserIPs 单个用户当前活跃连接的去重源 IP（refcount 快照，连接断开即移除；
@@ -114,6 +146,11 @@ type TrafficAckPayload struct {
 
 // CapTrafficAck 主控能力：流量批次落库回执 + BatchID 去重（见 AuthOKPayload.Caps）。
 const CapTrafficAck = "traffic_ack"
+
+// CapMetricsSplit 主控能力：支持 metrics 快车道（2026-11-01）。
+// 节点只在 auth_ok 里看到该能力时才把实时字段从心跳里摘出去单独发送；否则维持
+// 「所有字段 30s 心跳」的旧行为——这是本次拆分唯一的回滚开关。
+const CapMetricsSplit = "metrics_split"
 
 // CapPushCA 节点能力：支持 push_ca 把 CA 根证书落盘。
 // 主控只有在节点心跳声明该能力后，才会把出站 TLS 验签写成
@@ -262,6 +299,9 @@ type UpgradeXrayPayload struct {
 type AgentSettingsPayload struct {
 	ReportIntervalSec    int `json:"report_interval_sec,omitempty"`    // 流量上报周期（秒）
 	HeartbeatIntervalSec int `json:"heartbeat_interval_sec,omitempty"` // 状态心跳周期（秒）
+	// MetricsIntervalSec 快车道实时指标周期（秒，2026-11-01）。旧 agent 忽略未知字段，
+	// 继续按 yaml 的 metrics_interval（默认 3s）跑；0 = 保持现状。
+	MetricsIntervalSec int `json:"metrics_interval_sec,omitempty"`
 }
 
 // ResultPayload 指令回执（id 回填请求 ID）。

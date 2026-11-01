@@ -16,6 +16,10 @@ const (
 	MsgHeartbeat     = "heartbeat"
 	MsgTrafficReport = "traffic_report"
 	MsgResult        = "result"
+	// MsgMetrics 快车道实时指标（2026-11-01）：CPU / 网速 / 连接数 / 每用户速率，默认 3s 一帧。
+	// 主控只有在 auth_ok 里声明 CapMetricsSplit 时节点才发；旧主控收不到也不影响旧路径
+	// （节点仍把所有字段塞回 heartbeat，字节级行为不变）。
+	MsgMetrics = "metrics"
 
 	// 主控 → 节点
 	MsgPushConfig  = "push_config"

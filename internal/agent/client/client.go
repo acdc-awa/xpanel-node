@@ -44,10 +44,12 @@ type trafficKey struct {
 
 // Client 节点端客户端。
 type Client struct {
-	BaseURL         string // ws://<主控地址>/node/ws（连接时追加 ?node_id=）
-	NodeID          string
-	Secret          string
-	Heartbeat       time.Duration
+	BaseURL   string // ws://<主控地址>/node/ws（连接时追加 ?node_id=）
+	NodeID    string
+	Secret    string
+	Heartbeat time.Duration
+	// MetricsInterval 快车道实时指标周期（agent.yaml 的 metrics_interval，默认 3s）。
+	MetricsInterval time.Duration
 	ReconnectMax    time.Duration
 	Xray            *xrayproc.Proc
 	Collector       *collector.Collector
@@ -85,6 +87,11 @@ type Client struct {
 	// true  = 新主控：批次落库后才回执，收到 ok=true 才删批（至少一次投递）。
 	ackMode atomic.Bool
 
+	// metricsMode 主控是否声明支持 metrics 快车道（auth_ok 的 caps，每次建连刷新）。
+	// false = 旧主控：实时字段全部留在心跳里，字节级行为不变。
+	// true  = 快车道单独发 CPU/网速/连接数/每用户速率，心跳只留慢字段。
+	metricsMode atomic.Bool
+
 	// sentThisConn 本连接上已发出、等待主控回执的批次 ID。
 	// 同一条连接上每批只发一次：主控未回执时若每轮无脑重发，一旦对端是「不回执的主控」
 	// （旧版本，或写库持续失败），同一批流量会被反复累加（旧主控小时桶 upsert 是加法
@@ -104,8 +111,10 @@ type Client struct {
 	settingsMu     sync.Mutex
 	rtReport       time.Duration
 	rtHeartbeat    time.Duration
+	rtMetrics      time.Duration
 	reportReset    chan time.Duration
 	heartbeatReset chan time.Duration
+	metricsReset   chan time.Duration
 	collectReset   chan time.Duration
 	onlineReset    chan time.Duration
 	// reportKick 立即触发一次上报（建连成功后补发积压、账期切换后尽快送达封账批次）
@@ -137,6 +146,7 @@ func (c *Client) Run(ctx context.Context) {
 	}
 	c.reportReset = make(chan time.Duration, 1)
 	c.heartbeatReset = make(chan time.Duration, 1)
+	c.metricsReset = make(chan time.Duration, 1)
 	c.collectReset = make(chan time.Duration, 1)
 	c.onlineReset = make(chan time.Duration, 1)
 	c.reportKick = make(chan struct{}, 1)
@@ -524,6 +534,9 @@ func (c *Client) connectAndServe(ctx context.Context, backoff *time.Duration) er
 		log.Printf("agent: 认证回执载荷解析失败（按旧主控处理，流量发完即删）: %v", err)
 	}
 	c.ackMode.Store(authOK.HasCap(protocol.CapTrafficAck))
+	// 快车道协商：主控声明 metrics_split 才把实时字段从心跳摘出去。
+	// 每次建连重新判定——退回旧主控时自动恢复「全字段心跳」，这是本次拆分的回滚开关。
+	c.metricsMode.Store(authOK.HasCap(protocol.CapMetricsSplit))
 	c.resetSent()
 	const (
 		// 主控 ping 间隔 54s（PongWait*9/10），90s 只靠 ping 续命、留足网络抖动余量
@@ -564,6 +577,9 @@ func (c *Client) connectAndServe(ctx context.Context, backoff *time.Duration) er
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	defer hbCancel()
 	go c.heartbeatLoop(hbCtx, ws)
+	if c.metricsMode.Load() {
+		go c.metricsLoop(hbCtx, ws)
+	}
 
 	// 建连即补发积压（离线期间落盘的批次 + 上次未确认的批次），不必等下一个上报周期
 	c.kickReport()
@@ -674,7 +690,60 @@ func (c *Client) heartbeatLoop(ctx context.Context, ws *websocket.Conn) {
 	}
 }
 
+// metricsLoop 快车道：按指标周期发送 CPU / 网速 / 连接数 / 每用户速率。
+// 只在主控声明 metrics_split 时启动（见 connectAndServe）。写失败与心跳同策略：
+// 主动断开唤醒读循环触发重连，而不是留下一条只进不出的僵尸连接。
+func (c *Client) metricsLoop(ctx context.Context, ws *websocket.Conn) {
+	ticker := time.NewTicker(c.effectiveMetrics())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case d := <-c.metricsReset:
+			ticker.Reset(d)
+			continue
+		case <-ticker.C:
+			if err := c.sendMetrics(ctx); err != nil {
+				log.Printf("agent: 实时指标发送失败: %v（主动断开触发重连）", err)
+				_ = ws.Close()
+				return
+			}
+		}
+	}
+}
+
+// sendMetrics 组装并发送一帧快车道指标。
+func (c *Client) sendMetrics(ctx context.Context) error {
+	snap := c.Collector.Snapshot()
+	m := protocol.MetricsPayload{
+		CPU:         snap.CPU,
+		RxRate:      snap.RxRate,
+		TxRate:      snap.TxRate,
+		RxBytes:     snap.RxBytes,
+		TxBytes:     snap.TxBytes,
+		XrayRunning: c.Xray.IsRunning(),
+		TS:          time.Now().Unix(),
+	}
+	if snap.ConnOK {
+		m.Conns = &protocol.ConnStatsPayload{
+			TCPEstablished: snap.ConnTCPEstablished,
+			TCPTotal:       snap.ConnTCPTotal,
+			UDP:            snap.ConnUDP,
+		}
+	}
+	if c.Stats != nil {
+		// 只读采样：自己的基线、自己的连接，不碰计费采集的 c.last（见 stats.SampleRates）。
+		for _, r := range c.Stats.SampleRates(ctx) {
+			m.UserRates = append(m.UserRates, protocol.UserRatePayload{Email: r.Email, Up: r.Up, Down: r.Down})
+		}
+	}
+	return c.send(protocol.MsgMetrics, "", m)
+}
+
 // sendHeartbeat 组装并发送一帧心跳（含 xray 健康快照）。
+// 主控声明 metrics_split 时只发慢字段（内存/磁盘/在线名单/版本/状态/配置哈希）；
+// 实时字段（CPU/网速/连接数）挪到快车道，见 sendMetrics。
 func (c *Client) sendHeartbeat() error {
 	snap := c.Collector.Snapshot()
 	xrayRunning := c.Xray.IsRunning()
@@ -690,28 +759,35 @@ func (c *Client) sendHeartbeat() error {
 		onlineUsers = len(onlineIPs)
 	}
 	hb := protocol.HeartbeatPayload{
-		CPU:         snap.CPU,
-		Mem:         snap.Mem,
-		MemTotal:    snap.MemTotal,
-		Disk:        snap.Disk,
-		DiskTotal:   snap.DiskTotal,
+		Mem:       snap.Mem,
+		MemTotal:  snap.MemTotal,
+		Disk:      snap.Disk,
+		DiskTotal: snap.DiskTotal,
+		// xray_running 两车道都发：主控靠它在心跳里判断「进程不在就清空在线名单」，
+		// 缺字段会被反序列化成 false，慢帧一到就会把在线名单误清。
 		XrayRunning: xrayRunning,
 		OnlineUsers: onlineUsers,
 		OnlineIPs:   onlineIPs,
-		RxRate:      snap.RxRate,
-		TxRate:      snap.TxRate,
-		RxBytes:     snap.RxBytes,
-		TxBytes:     snap.TxBytes,
 		Version:     upgrade.Version,
 		Caps:        []string{protocol.CapPushCA, protocol.CapSyncCerts},
 		TS:          time.Now().Unix(),
 	}
+	// 连接数两车道都发：主控的服务器列表读的是 servers 表的三列（靠慢车道节流落库），
+	// 快车道那份只用于内存快照，缺哪一个都会让某一侧停更。
 	if snap.ConnOK {
 		hb.Conns = &protocol.ConnStatsPayload{
 			TCPEstablished: snap.ConnTCPEstablished,
 			TCPTotal:       snap.ConnTCPTotal,
 			UDP:            snap.ConnUDP,
 		}
+	}
+	// 未协商快车道（旧主控）：实时字段整份留在心跳里，行为与拆分前逐字节一致。
+	if !c.metricsMode.Load() {
+		hb.CPU = snap.CPU
+		hb.RxRate = snap.RxRate
+		hb.TxRate = snap.TxRate
+		hb.RxBytes = snap.RxBytes
+		hb.TxBytes = snap.TxBytes
 	}
 	// xray 起不来时把状态与原因带回主控（面板据此显示"为什么没起来"），
 	// 成功启动后 Failures 归零、LastError 作为"最近一次失败"淡显保留。
@@ -750,7 +826,9 @@ func (c *Client) TriggerHeartbeat() {
 const (
 	minHeartbeatInterval = 1 * time.Second
 	minReportInterval    = 3 * time.Second
-	maxSettingsInterval  = 30 * time.Minute
+	// minMetricsInterval 快车道下限：主控纯内存消费、0 磁盘 I/O，可以比上报周期激进。
+	minMetricsInterval  = 1 * time.Second
+	maxSettingsInterval = 30 * time.Minute
 )
 
 func clampInterval(d, min time.Duration) time.Duration {
@@ -783,6 +861,19 @@ func (c *Client) effectiveHeartbeat() time.Duration {
 	return c.Heartbeat
 }
 
+// effectiveMetrics 当前生效的快车道周期（远程下发优先，agent.yaml 兜底，最后 3s）。
+func (c *Client) effectiveMetrics() time.Duration {
+	c.settingsMu.Lock()
+	defer c.settingsMu.Unlock()
+	if c.rtMetrics > 0 {
+		return c.rtMetrics
+	}
+	if c.MetricsInterval > 0 {
+		return c.MetricsInterval
+	}
+	return 3 * time.Second
+}
+
 // effectiveCollect 生效采集周期 = min(yaml 配置, 生效上报周期)，
 // 防上报快于采集造成的增量粒度倒挂。
 func (c *Client) effectiveCollect() time.Duration {
@@ -812,6 +903,13 @@ func (c *Client) applyAgentSettings(p protocol.AgentSettingsPayload) string {
 		}
 		c.rtHeartbeat = d
 	}
+	if p.MetricsIntervalSec > 0 {
+		d := clampInterval(time.Duration(p.MetricsIntervalSec)*time.Second, minMetricsInterval)
+		if d != c.rtMetrics {
+			changed = append(changed, fmt.Sprintf("实时指标周期→%s", d))
+		}
+		c.rtMetrics = d
+	}
 	c.settingsMu.Unlock()
 	if len(changed) == 0 {
 		return "设置无变更"
@@ -832,6 +930,10 @@ func (c *Client) applyAgentSettings(p protocol.AgentSettingsPayload) string {
 	}
 	select {
 	case c.onlineReset <- c.effectiveHeartbeat():
+	default:
+	}
+	select {
+	case c.metricsReset <- c.effectiveMetrics():
 	default:
 	}
 	return strings.Join(changed, "，")

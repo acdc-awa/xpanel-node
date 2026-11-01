@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,6 +94,14 @@ type Collector struct {
 	// Close() 不影响在线拉取自愈；仅供后台拉取 goroutine 使用，无并发。
 	onlineConn *grpc.ClientConn
 	onlineCli  statsService.StatsServiceClient
+
+	// 速率采样专用连接与基线（2026-11-01）：与计费基线 last 完全隔离——计费采集消费一次
+	// 就会推进 c.last，第二个消费者再调 Collect() 会把增量吃掉（漏账）。这里自带基线、
+	// 自带连接，且**只允许 metricsLoop 单 goroutine 调用**（无锁，靠调用方串行保证）。
+	rateConn *grpc.ClientConn
+	rateCli  statsService.StatsServiceClient
+	rateLast map[string]int64
+	rateAt   time.Time
 }
 
 // New 构造采集器（apiAddr 如 127.0.0.1:10085）。
@@ -197,6 +206,130 @@ func onlineUsersFromResp(resp *statsService.GetUsersStatsResponse) []OnlineUser 
 		users = append(users, OnlineUser{Email: u.GetEmail(), IPs: ips, LastSeen: lastSeen})
 	}
 	return users
+}
+
+// RateSample 单个统计键的瞬时速率（字节/秒）。
+type RateSample struct {
+	Email string
+	Up    float64
+	Down  float64
+}
+
+// SampleRates 采样每个在线用户的瞬时上下行速率（2026-11-01，快车道专用）。
+//
+// 与 Collect 的三条硬边界：
+//   - **不复用 Collect 的基线与锁**：那边每消费一次就推进 c.last，被第二方读一次就吃掉
+//     计费增量（漏账）。这里自带 rateLast/rateAt 与专用 gRPC 连接，计费链路零影响。
+//   - **只读**：QueryStats 固定 Reset_=false，绝不清零 xray 计数器。
+//   - **只采在线用户**：离线用户速率恒为 0，没有传输价值；在线名单来自后台在线快照
+//     （零额外 RPC），快照超龄（xray 卡死）时直接不采，宁可空也不给冻结读数。
+//
+// 速率 = (本次累计值 − 上次累计值) ÷ 两次采样的真实间隔。首帧只建基线；计数器新出现或
+// xray 重启归零（值变小）时本帧记 0 并重建基线，避免把历史总量当成一秒的流量。
+// 调用方必须串行（metricsLoop 单 goroutine）。
+func (c *Collector) SampleRates(ctx context.Context) []RateSample {
+	snap := c.online.Load()
+	if snap == nil || snap.at.IsZero() || time.Since(snap.at) > maxOnlineStale {
+		return nil
+	}
+	online := make(map[string]struct{}, len(snap.users))
+	for _, u := range snap.users {
+		online[u.Email] = struct{}{}
+	}
+	if len(online) == 0 {
+		return nil
+	}
+
+	if c.rateCli == nil {
+		conn, err := grpc.NewClient(c.apiAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return nil
+		}
+		c.rateConn = conn
+		c.rateCli = statsService.NewStatsServiceClient(conn)
+		c.rateLast = make(map[string]int64)
+		c.rateAt = time.Time{}
+	}
+
+	qctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	// Pattern 是子串匹配（xray 侧 strings.Contains），"user>>>" 只捞用户计数器族。
+	resp, err := c.rateCli.QueryStats(qctx, &statsService.QueryStatsRequest{Pattern: "user>>>", Reset_: false})
+	if err != nil {
+		// 连接已坏：丢连接与基线，下次调用重建（重建后首帧只建基线，不会产生假尖峰）
+		_ = c.rateConn.Close()
+		c.rateConn, c.rateCli, c.rateLast, c.rateAt = nil, nil, nil, time.Time{}
+		return nil
+	}
+
+	now := time.Now()
+	dt := now.Sub(c.rateAt).Seconds()
+	if c.rateLast == nil || c.rateAt.IsZero() || dt <= 0 {
+		c.seedRateBaseline(resp.Stat)
+		c.rateAt = now
+		return nil
+	}
+	out := c.applyRateDeltas(resp.Stat, dt, online)
+	c.rateAt = now
+	return out
+}
+
+// applyRateDeltas 用本次计数器与上次基线算出速率（就地推进基线，不可跨 goroutine 并发调用）。
+// 首见计数器与「值变小」（xray 重启归零）都只重建基线、本帧记 0——否则会把历史总量
+// 当成一秒的流量，面板上出现几十 MB/s 的假尖峰。
+func (c *Collector) applyRateDeltas(stat []*statsService.Stat, dt float64, online map[string]struct{}) []RateSample {
+	up := make(map[string]float64, len(online))
+	down := make(map[string]float64, len(online))
+	seen := make(map[string]struct{}, len(stat))
+	for _, st := range stat {
+		m := userRe.FindStringSubmatch(st.Name)
+		if m == nil {
+			continue
+		}
+		seen[st.Name] = struct{}{}
+		prev, ok := c.rateLast[st.Name]
+		if !ok || st.Value < prev {
+			c.rateLast[st.Name] = st.Value
+			continue
+		}
+		delta := st.Value - prev
+		c.rateLast[st.Name] = st.Value
+		if delta == 0 {
+			continue
+		}
+		rate := float64(delta) / dt
+		if m[2] == "uplink" {
+			up[m[1]] += rate
+		} else {
+			down[m[1]] += rate
+		}
+	}
+	// 清理已消失的计数器（用户被删 / 入站被删），防 map 无界增长
+	for name := range c.rateLast {
+		if _, ok := seen[name]; !ok {
+			delete(c.rateLast, name)
+		}
+	}
+
+	out := make([]RateSample, 0, len(online))
+	for email := range online {
+		out = append(out, RateSample{Email: email, Up: up[email], Down: down[email]})
+	}
+	// 固定顺序（按统计键字典序）：帧内容可复现，便于排查与测试比对
+	sort.Slice(out, func(i, j int) bool { return out[i].Email < out[j].Email })
+	return out
+}
+
+// seedRateBaseline 用当前累计值重建速率基线（首帧 / 重连后）。
+func (c *Collector) seedRateBaseline(stat []*statsService.Stat) {
+	if c.rateLast == nil {
+		c.rateLast = make(map[string]int64, len(stat))
+	}
+	for _, st := range stat {
+		if userRe.MatchString(st.Name) {
+			c.rateLast[st.Name] = st.Value
+		}
+	}
 }
 
 // connectLocked 建立 gRPC 连接（调用方须持有 mu）。

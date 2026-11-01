@@ -13,13 +13,17 @@ import (
 
 // Config Agent 配置（对应 agent.yaml）。
 type Config struct {
-	Master       Master        `yaml:"master"`
-	Xray         Xray          `yaml:"xray"`
-	Stats        Stats         `yaml:"stats"`
-	Update       Update        `yaml:"update"`
-	Geo          geo.Config    `yaml:"geo"`                // geoip.dat / geosite.dat 自动更新
-	Heartbeat    time.Duration `yaml:"heartbeat_interval"` // 心跳间隔
-	ReconnectMax time.Duration `yaml:"reconnect_max"`      // 重连退避上限
+	Master    Master        `yaml:"master"`
+	Xray      Xray          `yaml:"xray"`
+	Stats     Stats         `yaml:"stats"`
+	Update    Update        `yaml:"update"`
+	Geo       geo.Config    `yaml:"geo"`                // geoip.dat / geosite.dat 自动更新
+	Heartbeat time.Duration `yaml:"heartbeat_interval"` // 心跳间隔
+	// Metrics 快车道实时指标周期（CPU/网速/连接数/每用户速率）。主控未下发
+	// agent_settings.metrics_interval_sec 时用它兜底；缺键 = 默认 3s（Load 先套
+	// Default() 再反序列化，存量 agent.yaml 不需要为此改文件）。
+	Metrics      time.Duration `yaml:"metrics_interval"`
+	ReconnectMax time.Duration `yaml:"reconnect_max"` // 重连退避上限
 	// Phase T：内部账户与证书
 	AccountsPath string `yaml:"accounts_path"` // relay 内部账户持久化文件
 	CertsDir     string `yaml:"certs_dir"`     // push_cert 落盘根目录
@@ -72,6 +76,7 @@ type Update struct {
 func Default() *Config {
 	return &Config{
 		Heartbeat:    30 * time.Second,
+		Metrics:      3 * time.Second,
 		ReconnectMax: 60 * time.Second,
 		Xray: Xray{
 			Bin:          "/usr/local/bin/xray",
@@ -121,6 +126,7 @@ func Load(path string) (*Config, error) {
 		def   time.Duration
 	}{
 		{"heartbeat_interval", cfg.Heartbeat, 30 * time.Second},
+		{"metrics_interval", cfg.Metrics, 3 * time.Second},
 		{"reconnect_max", cfg.ReconnectMax, 60 * time.Second},
 		{"stats.collect_interval", cfg.Stats.CollectInterval, 30 * time.Second},
 		{"stats.report_interval", cfg.Stats.ReportInterval, 60 * time.Second},

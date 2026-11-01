@@ -145,6 +145,7 @@ func main() {
 		NodeID:          cfg.Master.NodeID,
 		Secret:          cfg.Master.Secret,
 		Heartbeat:       cfg.Heartbeat,
+		MetricsInterval: cfg.Metrics,
 		ReconnectMax:    cfg.ReconnectMax,
 		Xray:            proc,
 		Collector:       sysCollector,
