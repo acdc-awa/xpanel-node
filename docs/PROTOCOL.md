@@ -41,7 +41,7 @@
 | `metrics` | MetricsPayload | **快车道实时指标（2026-11-01）**：CPU / 网速 / 累计网络字节 / 连接数 / 每用户速率，默认 3s（`agent_settings.metrics_interval_sec` 可调）。**只有主控声明 `metrics_split` 能力时才发送**；每一帧都是全量快照、可丢，主控就地覆盖 |
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s）。带 `batch_id` 的批次，主控落库后回 `traffic_ack` |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
-| `internal_uuid_report` | InternalUUIDReportPayload | relay 内部 UUID 变更上报。**主控侧已实现接收**，但节点当前不发送（内部 UUID 由 `setup_internal_account` 的 `result` 回执承载），保留类型供后续使用 |
+| `internal_uuid_report` | InternalUUIDReportPayload | **已废弃（2026-11-04）**：节点从发送过，主控接收端已移除；relay 入站模型退役后无消费方。类型常量保留仅为协议表完整 |
 | `upgrade_progress` | UpgradeProgressPayload | agent 升级进度状态上报（阶段流式通知，2026-09-03 新增） |
 
 ### 主控 → 节点
@@ -53,8 +53,8 @@
 | `restart_xray` | — | 重启 xray 进程 |
 | `get_status` | — | 查询完整状态，回 `result`（data 为 StatusData） |
 | `get_logs` | GetLogsPayload | 拉取最近日志，回 `result`（data 为日志文本） |
-| `setup_internal_account` | SetupInternalAccountPayload | 为 relay 入站生成内部 UUID，回 `result`（data 为 SetupInternalResult） |
-| `rotate_internal_account` | SetupInternalAccountPayload | 重新生成内部 UUID |
+| `setup_internal_account` | SetupInternalAccountPayload | **已废弃（2026-11-04）**：relay 入站模型退役后主控不再发送（旧主控 ≤ v0.2.2 也不会发）；agent 侧 handler 暂时保留以兼容更早主控 |
+| `rotate_internal_account` | SetupInternalAccountPayload | **已废弃（2026-11-04）**：主控端点已删除，同上 |
 | `push_cert` | PushCertPayload | TLS 证书下发（agent 校验 PEM 匹配后落盘） |
 | `push_ca` | PushCAPayload | CA 根证书下发（只有公钥，落盘 `<certs_dir>/ca/<id>.crt`；出站配置以 `certificateFile` 引用）。**旧 agent 会静默丢弃且不回帧**——主控必须先看节点心跳 `caps` 是否含 `push_ca`，未声明时退回内联 PEM |
 | `sync_certs` | SyncCertsPayload | 证书目录 GC：主控下发当前仍被引用的域名全集，节点删除 `<certs_dir>` 下不在集合中的托管证书目录（只删含 `fullchain.pem` 的 `push_cert` 布局，不碰 `ca/` 与人工文件）。需节点声明 `sync_certs` 能力 |
