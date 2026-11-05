@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/acdc-awa/xpanel-node/internal/agent/fsutil"
 )
 
 // 本文件：geoip.dat / geosite.dat 的落盘。与内核替换共用「sha256 必检 + 原子替换 + .prev 回滚」
@@ -47,7 +49,7 @@ func ReplaceGeoFile(dir, name string, data []byte) (changed bool, prevPath strin
 
 	prevPath = dst + ".prev"
 	if _, statErr := os.Stat(dst); statErr == nil {
-		if err := copyFile(dst, prevPath); err != nil {
+		if err := fsutil.CopyFile(dst, prevPath, 0o644); err != nil {
 			return false, "", fmt.Errorf("备份现有 %s 失败: %w", name, err)
 		}
 	} else {

@@ -29,7 +29,7 @@ type HeartbeatPayload struct {
 	TxBytes     uint64          `json:"tx_bytes"`          // 累计物理网卡发送字节
 	Version     string          `json:"version,omitempty"` // agent 版本（旧 agent 不上报）
 	// Caps 节点能力声明（agent→主控）：主控据此决定能否使用只在新 agent 上可行的配置形态。
-	// 旧 agent 不发（nil）；旧主控忽略未知字段。当前仅 CapPushCA。
+	// 旧 agent 不发（nil）；旧主控忽略未知字段。当前声明 CapPushCA 与 CapSyncCerts。
 	Caps []string `json:"caps,omitempty"`
 	TS   int64    `json:"ts"` // unix 秒
 	// 启动失败可观测性（2026-09-21）：xray 起不来时把状态与原因带回主控，
@@ -263,7 +263,7 @@ type SyncCertsPayload struct {
 }
 
 // InternalUUIDReportPayload 节点→主控：内部 UUID 变更主动上报（如 CLI 轮换）。
-// 主控侧已实现接收；agent 当前不发（内部 UUID 经 SetupInternalResult 回执承载），保留备用。
+// 历史字段：relay 内部账户模型已下线，主控侧接收逻辑已删除、agent 也从不发送，保留仅为协议序号稳定。
 type InternalUUIDReportPayload struct {
 	Tag  string `json:"tag"`
 	UUID string `json:"uuid"`

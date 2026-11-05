@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/acdc-awa/xpanel-node/internal/agent/fsutil"
 	"github.com/acdc-awa/xpanel-node/internal/agent/logfile"
 )
 
@@ -463,7 +464,7 @@ func (p *Proc) RestartWithConfig(configJSON string) error {
 	}
 	// 新配置已生效：清理备份，并留一份"上一份可用配置"副本供开机回退
 	_ = os.Remove(p.ConfigPath + ".bak")
-	_ = copyFile(p.ConfigPath, p.ConfigPath+goodSuffix)
+	_ = fsutil.CopyFile(p.ConfigPath, p.ConfigPath+goodSuffix, 0o644)
 	p.clearRejected()
 	return nil
 }
@@ -505,7 +506,7 @@ func (p *Proc) WriteConfigIfValid(configJSON string) error {
 		return fmt.Errorf("替换配置失败: %w", err)
 	}
 	// 热更配置落盘且通过 -test：同步刷新 .good 副本
-	_ = copyFile(p.ConfigPath, p.ConfigPath+goodSuffix)
+	_ = fsutil.CopyFile(p.ConfigPath, p.ConfigPath+goodSuffix, 0o644)
 	return nil
 }
 
@@ -943,15 +944,6 @@ func (p *Proc) setNotice(note string) {
 	defer p.mu.Unlock()
 	p.lastErr = note
 	p.lastErrAt = time.Now()
-}
-
-// copyFile 复制文件内容（同目录 rename 语义的简化版：目标先截断再写，失败不影响源）。
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }
 
 // Status 返回运行状态。与 Health() 同口径：pid 文件指向活着的 xray 即算运行

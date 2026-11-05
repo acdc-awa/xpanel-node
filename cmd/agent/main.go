@@ -31,7 +31,11 @@ func main() {
 	if len(args) > 0 && cli.IsSubcommand(args[0]) {
 		if args[0] == "run" {
 			forcedRun = true
+			// argv 与 args 必须同步剥离 "run"：只改 os.Args 会让下面的「拼写错误」
+			// 判定仍看到 "run"，从而把 run 又交回 CLI（那里只会打印提示并退出），
+			// 于是 `xray-agent run` 永远进不了主循环。
 			os.Args = append([]string{os.Args[0]}, args[1:]...)
+			args = args[1:]
 		} else {
 			os.Exit(cli.Run(args, os.Stdin, os.Stdout, os.Stderr))
 		}

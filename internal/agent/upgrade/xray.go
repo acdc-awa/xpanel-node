@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/acdc-awa/xpanel-node/internal/agent/fsutil"
 )
 
 // 本文件：Xray 内核（xray 可执行文件）的下载/校验/原子替换。
@@ -241,7 +243,7 @@ func ReplaceXrayBinary(binPath string, data []byte) (prevPath string, err error)
 
 	// 备份现有二进制（首次升级时可能不存在，忽略）
 	if _, statErr := os.Stat(binPath); statErr == nil {
-		if err := copyFile(binPath, prevPath); err != nil {
+		if err := fsutil.CopyFile(binPath, prevPath, 0o755); err != nil {
 			return "", fmt.Errorf("备份现有 xray 失败: %w", err)
 		}
 	}
@@ -287,30 +289,3 @@ func RollbackXrayBinary(binPath, prevPath string) error {
 	return nil
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, dst)
-}
