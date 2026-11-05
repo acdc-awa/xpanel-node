@@ -2,10 +2,10 @@
 package tlscert
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -33,23 +33,30 @@ func ValidatePair(certPEM, keyPEM string) error {
 	if err != nil {
 		return err
 	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return fmt.Errorf("不支持的私钥类型 %T", key)
+	}
+	pub := signer.Public()
 	for _, leaf := range certs {
-		switch k := key.(type) {
-		case *rsa.PrivateKey:
-			pub, ok := leaf.PublicKey.(*rsa.PublicKey)
-			if ok && pub.N.Cmp(k.PublicKey.N) == 0 {
-				return nil
-			}
-		case *ecdsa.PrivateKey:
-			pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
-			if ok && pub.X.Cmp(k.PublicKey.X) == 0 && pub.Y.Cmp(k.PublicKey.Y) == 0 {
-				return nil
-			}
-		default:
-			return fmt.Errorf("不支持的私钥类型 %T", key)
+		if PublicKeysEqual(leaf.PublicKey, pub) {
+			return nil
 		}
 	}
 	return fmt.Errorf("证书与私钥不匹配")
+}
+
+// PublicKeysEqual 判断两个公钥是否为同一密钥。
+//
+// 统一走各实现自带的 crypto.PublicKey.Equal：RSA 比 (N,E)、ECDSA 比曲线与坐标、
+// Ed25519 比完整公钥。不要手工比较 ecdsa.PublicKey.X/Y——该字段自 Go 1.26 起已弃用，
+// 只比坐标会漏掉曲线，RSA 只比 N 会漏掉指数，Ed25519 则根本没有对应分支。
+func PublicKeysEqual(a, b crypto.PublicKey) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	eq, ok := a.(interface{ Equal(crypto.PublicKey) bool })
+	return ok && eq.Equal(b)
 }
 
 // ParseChain 解析证书链中的全部 CERTIFICATE 块。
@@ -137,7 +144,8 @@ func SanitizeDomain(domain string) string {
 }
 
 // GenerateSelfSigned 生成自签证书（链式代理 TLS + pinnedPeerCertSha256 场景）：
-// ECDSA P-256、10 年期、IsCA 自签根形态。安全性由中转出站 pin 哈希保证（pin 命中即
+// ECDSA P-256、10 年期、IsCA 自签形态（信任锚兼容），但不置 KeyUsageCertSign——
+// 它只服务 TLS，不签发任何证书。安全性由中转出站 pin 哈希保证（pin 命中即
 // 验证通过，不依赖 CA 信任链），自签不降低链路安全性。
 func GenerateSelfSigned(domain string) (certPEM, keyPEM string, err error) {
 	if !DomainRe.MatchString(domain) {
@@ -156,7 +164,7 @@ func GenerateSelfSigned(domain string) (certPEM, keyPEM string, err error) {
 		Subject:               pkix.Name{CommonName: domain, Organization: []string{"xray-panel relay"}},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(10, 0, 0),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
