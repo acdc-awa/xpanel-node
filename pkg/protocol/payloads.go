@@ -161,16 +161,6 @@ const CapPushCA = "push_ca"
 // 主控只在节点声明该能力后下发 GC；旧 agent 忽略未知消息（不回帧），主控不会等它。
 const CapSyncCerts = "sync_certs"
 
-// HasCapability 判断能力列表是否包含 cap（nil/空列表返回 false）。
-func HasCapability(caps []string, cap string) bool {
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // AuthOKPayload 主控→节点：认证成功回执。
 //
 // Caps 声明主控支持的可选能力，是**双向兼容的关键**：节点只有在 Caps 里看到
@@ -310,9 +300,6 @@ type ResultPayload struct {
 	Error string `json:"error,omitempty"`
 	Data  any    `json:"data,omitempty"`
 }
-
-// GetStatusPayload 查询完整状态。
-type GetStatusPayload struct{}
 
 // StatusData Agent 返回的完整状态。
 type StatusData struct {

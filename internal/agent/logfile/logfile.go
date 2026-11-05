@@ -95,24 +95,6 @@ func (w *Sliding) Size() int64 {
 	return w.size
 }
 
-// Vacuum 立即裁剪到窗口内，返回释放的字节数。
-func (w *Sliding) Vacuum() (int64, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.maxBytes <= 0 {
-		return 0, nil
-	}
-	if w.f != nil {
-		_ = w.f.Close()
-		w.f = nil
-	}
-	freed, err := SlideNow(w.path, w.maxBytes)
-	if rerr := w.reopenLocked(); rerr != nil && err == nil {
-		err = rerr
-	}
-	return freed, err
-}
-
 // checkExternalLocked 发现文件被外部替换/删除/截断时重开，避免继续往旧 inode 里写。
 func (w *Sliding) checkExternalLocked() {
 	now := time.Now()

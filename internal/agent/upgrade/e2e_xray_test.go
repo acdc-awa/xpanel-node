@@ -106,7 +106,7 @@ func TestXrayDownloadRejectsBadDigest(t *testing.T) {
 	f := NewXrayFetcher("", 0)
 	f.Mirrors = []string{srv.URL}
 	f.Repo = "o/x"
-	if _, _, err := f.XrayDownload("v26.10.21"); err == nil {
+	if _, err := f.XrayDownloadBundle("v26.10.21"); err == nil {
 		t.Fatal("摘要不符应当拒绝")
 	}
 }
@@ -127,7 +127,7 @@ func TestXrayDownloadNoDigest(t *testing.T) {
 	f := NewXrayFetcher("", 0)
 	f.Mirrors = []string{srv.URL}
 	f.Repo = "o/x"
-	if _, _, err := f.XrayDownload("v26.10.21"); err == nil {
+	if _, err := f.XrayDownloadBundle("v26.10.21"); err == nil {
 		t.Fatal("缺 .dgst 应当拒绝")
 	}
 }

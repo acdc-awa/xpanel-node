@@ -89,8 +89,6 @@ type Outbox struct {
 	mu      sync.Mutex
 	seq     uint64
 	batches []Batch
-	// dropped 累计被丢弃的批次数（超龄/超量/损坏隔离），供日志与状态展示。
-	dropped int
 }
 
 // 默认阈值（构造时可覆盖，见 SetLimits / SetMaxBytes）。
@@ -208,17 +206,6 @@ func (o *Outbox) Append(entries []Entry) (Batch, bool, error) {
 	return b, true, nil
 }
 
-// Oldest 返回最旧的未确认批次（无则 false）。调用方拿到的是副本（Entries 已复制），
-// 可安全在锁外发送。
-func (o *Outbox) Oldest() (Batch, bool) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if len(o.batches) == 0 {
-		return Batch{}, false
-	}
-	return cloneBatch(o.batches[0]), true
-}
-
 // OldestExcept 按 FIFO 返回第一个 skip 判定为「不跳过」的批次（全被跳过或无批次则 false）。
 // 供上报侧跳过本连接已发出、正在等主控回执的批次，避免无谓重发。
 // 谓词在持有内部锁时调用：实现方只能读自己的状态，不得回调 Outbox 方法（会死锁）。
@@ -270,7 +257,7 @@ func (o *Outbox) Ack(batchID string) (bool, error) {
 	return true, nil
 }
 
-// DropExpired 丢弃超龄与超量批次，返回本次丢弃数（累计值见 Dropped）。
+// DropExpired 丢弃超龄与超量批次，返回本次丢弃数。
 // 由上报循环周期调用。丢弃即数据丢失，故返回的数目必须被调用方以告警级别记录。
 func (o *Outbox) DropExpired(now time.Time) int {
 	o.mu.Lock()
@@ -300,15 +287,7 @@ func (o *Outbox) DropExpired(now time.Time) int {
 		return 0
 	}
 	o.batches = saved
-	o.dropped += dropped
 	return dropped
-}
-
-// Dropped 累计丢弃批次数（进程内）。
-func (o *Outbox) Dropped() int {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.dropped
 }
 
 // saveLocked 原子落盘（同目录临时文件 + fsync + rename，权限 600）。纯内存模式直接返回。
@@ -337,7 +316,6 @@ func (o *Outbox) saveLocked(seq uint64, batches []Batch) ([]Batch, error) {
 		if len(data) <= maxB || len(batches) <= 1 {
 			break
 		}
-		o.dropped++
 		batches = batches[1:]
 	}
 

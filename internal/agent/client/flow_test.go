@@ -107,7 +107,7 @@ func TestReportPendingPersistsAndSends(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("落盘成功后 pending 应清空，实际 %d 条", n)
 	}
-	b, _ := c.Outbox.Oldest()
+	b, _ := c.Outbox.OldestExcept(func(string) bool { return false })
 	if b.Entries[0].CycleID != 5 {
 		t.Fatalf("批次应带采集时刻的账期 ID 5，实际 %d", b.Entries[0].CycleID)
 	}
@@ -128,7 +128,7 @@ func TestAckRemovesBatch(t *testing.T) {
 	c := newFlowClient(t)
 	c.accumulate([]stats.Entry{{Email: "a", Up: 1}})
 	c.reportPending()
-	b, _ := c.Outbox.Oldest()
+	b, _ := c.Outbox.OldestExcept(func(string) bool { return false })
 
 	// 主控回绝（写库失败）：保留
 	if res := c.dispatch(mustMsg(t, protocol.MsgTrafficAck,

@@ -76,16 +76,6 @@ type XrayBundle struct {
 	Official bool              // 固定 true，便于调用方区分数据来源
 }
 
-// XrayDownload 按候选链下载指定版本的 Xray 压缩包，校验 sha256 后返回其中 xray 可执行文件的字节。
-// 返回的 expected 摘要仅用于日志/回执展示（校验已在内部完成）。
-func (f *XrayFetcher) XrayDownload(tag string) (bin []byte, sha string, err error) {
-	b, err := f.XrayDownloadBundle(tag)
-	if err != nil {
-		return nil, "", err
-	}
-	return b.Bin, b.SHA256, nil
-}
-
 // XrayDownloadBundle 下载并解包完整发布包（内核 + geo 数据），只走一次下载。
 // 换内核与 geo 回退共用：两者必须来自同一个已校验压缩包，不能各下一份。
 func (f *XrayFetcher) XrayDownloadBundle(tag string) (*XrayBundle, error) {

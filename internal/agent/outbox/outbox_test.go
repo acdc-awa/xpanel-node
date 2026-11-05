@@ -45,7 +45,7 @@ func TestAppendPersistAndAck(t *testing.T) {
 	if batches != 1 || entries != 1 {
 		t.Fatalf("重启后应恢复 1 批 1 条，实际 %d 批 %d 条", batches, entries)
 	}
-	got, ok := o2.Oldest()
+	got, ok := oldest(o2)
 	if !ok || got.ID != b.ID {
 		t.Fatalf("重启后批次 ID 应保持不变（重发复用同一 ID 才能被主控去重），实际 %q want %q", got.ID, b.ID)
 	}
@@ -99,7 +99,7 @@ func TestBatchIsImmutable(t *testing.T) {
 	b1, _, _ := o.Append([]Entry{{Email: "a", Up: 10}})
 	_, _, _ = o.Append([]Entry{{Email: "a", Up: 20}})
 
-	first, _ := o.Oldest()
+	first, _ := oldest(o)
 	if len(first.Entries) != 1 || first.Entries[0].Up != 10 {
 		t.Fatalf("最旧批次内容必须保持创建时原样，实际 %+v", first.Entries)
 	}
@@ -166,10 +166,7 @@ func TestDropExpired(t *testing.T) {
 	if n := o.DropExpired(time.Now()); n != 1 {
 		t.Fatalf("应丢弃 1 个超龄批次，实际 %d", n)
 	}
-	if o.Dropped() != 1 {
-		t.Fatalf("累计丢弃数应为 1，实际 %d", o.Dropped())
-	}
-	rest, _ := o.Oldest()
+	rest, _ := oldest(o)
 	if rest.ID != fresh.ID {
 		t.Fatalf("未超龄批次应保留，实际队首 %q want %q", rest.ID, fresh.ID)
 	}
@@ -188,7 +185,7 @@ func TestDropOverLimit(t *testing.T) {
 	if n := o.DropExpired(time.Now()); n != 2 {
 		t.Fatalf("超量应丢弃 2 个最旧批次，实际 %d", n)
 	}
-	first, _ := o.Oldest()
+	first, _ := oldest(o)
 	if len(first.Entries) != 1 || first.Entries[0].Up != 3 {
 		t.Fatalf("应保留最后 3 批（队首 Up=3），实际 %+v", first.Entries)
 	}
@@ -315,14 +312,11 @@ func TestMaxBytesLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if o.Dropped() == 0 {
-		t.Fatalf("超字节上限应记录丢弃，实际 dropped = %d", o.Dropped())
-	}
 	batches, entries := o.Pending()
 	if batches != 1 || entries != 1 {
 		t.Fatalf("超上限修剪后应保留最新 1 批 1 条，实际 %d 批 %d 条", batches, entries)
 	}
-	oldest, ok := o.Oldest()
+	oldest, ok := oldest(o)
 	if !ok || oldest.ID != b2.ID {
 		t.Fatalf("保留的应是最新批次 b2(%s)，实际 %+v", b2.ID, oldest)
 	}
@@ -369,7 +363,7 @@ func TestSalvageBatchesOnTruncatedFile(t *testing.T) {
 	if batches != 2 || entries != 2 {
 		t.Fatalf("应抢救出 2 批 2 条，实际 %d 批 %d 条", batches, entries)
 	}
-	oldest, ok := o2.Oldest()
+	oldest, ok := oldest(o2)
 	if !ok || oldest.ID != b1.ID {
 		t.Fatalf("队首应为 b1(%s)，实际 %+v", b1.ID, oldest)
 	}
@@ -379,3 +373,7 @@ func TestSalvageBatchesOnTruncatedFile(t *testing.T) {
 	}
 }
 
+// oldest 取队首批次（测试专用；生产侧只走 OldestExcept 的 skip 语义）。
+func oldest(o *Outbox) (Batch, bool) {
+	return o.OldestExcept(func(string) bool { return false })
+}
