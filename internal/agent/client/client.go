@@ -1151,16 +1151,17 @@ func (c *Client) runUpgrade(reqID, target string, force bool) {
 		reply(protocol.ResultPayload{OK: true, Data: fmt.Sprintf("已是最新版本 %s（远端 %s）", from, target)})
 		return
 	}
-	if force && from != "dev" && (from == target || cmp == 0) {
-		errMsg := fmt.Sprintf("当前已是版本 %s，无需回滚", from)
-		report("failed", errMsg, "")
-		reply(protocol.ResultPayload{OK: false, Error: errMsg, Data: errMsg})
-		return
+	if force && cmp == 0 {
+		// force + 同版本 = 重装：二进制损坏、被替换或需要重新落盘时用，继续走下载替换。
+		report("checking", fmt.Sprintf("强制重装 agent %s", target), "")
 	}
 
 	action := "升级"
-	if cmp > 0 {
+	switch {
+	case cmp > 0:
 		action = "回滚"
+	case cmp == 0:
+		action = "重装"
 	}
 
 	exe, err := os.Executable()
