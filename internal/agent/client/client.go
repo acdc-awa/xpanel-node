@@ -984,18 +984,26 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 			c.kickReport() // 封账批次尽快送达（不必等下一个上报周期）
 		}
 		c.applyCycles(p.Users)
-		if err := c.Stats.SyncUsers(context.Background(), p.Users); err != nil {
-			return &protocol.ResultPayload{OK: false, Error: err.Error()}
-		}
+		hotErr := c.Stats.SyncUsers(context.Background(), p.Users)
 		// 热更顺带落盘（不变量 I2）：磁盘必须等于运行中配置的快照，否则节点重启
 		// （自愈 / 开机 / 手动重启）会把用户集回退到上一次冷更。
 		// 顺序不可颠倒：先热更（gRPC）后落盘——-test 比 gRPC 严格，先落盘会把
 		// "热更得过、-test 不过"的内容留在磁盘上，节点一重启就起不来。
+		// 但热更失败不等于配置非法：主控在磁盘偏离时会顺带下发整份配置，而偏离场景下
+		// 运行中的结构对不上，handler not found 让热更必然失败（2026-11-15 迁移事故）。
+		// 此时仍然尝试落盘：WriteConfigIfValid 自带 -test，通过就说明这份内容可以启动，
+		// 磁盘先回到主控记录的内容，下一次冷推/重启即可加载，不再让偏离无限期挂着。
 		// 落盘失败如实回执（OK=false）：用户已同步但磁盘没跟上，主控应当知道并能重试。
 		if p.ConfigJSON != "" && c.Xray != nil {
-			if err := c.Xray.WriteConfigIfValid(p.ConfigJSON); err != nil {
-				return &protocol.ResultPayload{OK: false, Error: "用户已同步，但配置落盘失败: " + err.Error()}
+			if werr := c.Xray.WriteConfigIfValid(p.ConfigJSON); werr != nil {
+				if hotErr != nil {
+					return &protocol.ResultPayload{OK: false, Error: "热更失败: " + hotErr.Error() + "；配置落盘失败: " + werr.Error()}
+				}
+				return &protocol.ResultPayload{OK: false, Error: "用户已同步，但配置落盘失败: " + werr.Error()}
 			}
+		}
+		if hotErr != nil {
+			return &protocol.ResultPayload{OK: false, Error: hotErr.Error()}
 		}
 		return &protocol.ResultPayload{OK: true, Data: "用户列表同步成功（gRPC 动态调整）"}
 	case protocol.MsgTrafficAck:
