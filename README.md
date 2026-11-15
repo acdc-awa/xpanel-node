@@ -4,9 +4,12 @@ XPanel 面板的被控节点 Agent：托管 Xray-core 进程，通过 WSS 长连
 
 - 主控仓库：**XPanel**（`github.com/acdc-awa/xpanel`）
 - 通信协议：见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（协议代码单源在 `pkg/protocol/`，主控经 go.mod 引入）
-- 锁定 Xray 版本：**v26.10.31**（Go 依赖钉 `v1.260327.1-0.20261031132019-a4a3dff5b20c`）
+- 锁定 Xray 版本：**v26.11.9**（Go 依赖钉 `v1.260327.1-0.20261109052709-676eaf66f8f0`）
+  - 26.11.9 相对 26.10.31 的关键差异：①uTLS 默认指纹切到 Chrome 155（hellochrome_155）；
+    ②freedom `finalRules.blockDelay` 起弃用、改名 `delay`（旧键仍兼容并打弃用警告）；
+    ③VLESS mux 默认 `maxConcurrency=128` / `maxReuseTimes=1024`；④新增 XDRIVE 传输（面板未启用）。
   - 26.10.31 是紧急安全更新：默认关闭 MPTCP（Linux 内核监听 IPv4 MPTCP 存在远程提权，而 Go 1.24+ 默认开启）。
-    **v26.10.29 已被上游撤版**，节点应尽快升到 26.10.31。
+    **v26.10.29 已被上游撤版**，26.10.31 是安全基线。
   - 26.10.29 相对 26.10.21 的两条关键差异：①freedom `blockDelay` 对 DispatchLink 型入站
     （VLESS/Hysteria）终于生效——此前黑洞延迟形同虚设，客户端连接会一直挂到自身超时；
     ②VLESS 出站不带 TLS/vlessenc 时，只认 Go 口径的私网（RFC1918 / 回环 / 链路本地），
