@@ -134,9 +134,6 @@ func (o *Outbox) SetMaxBytes(maxBytes int) {
 	}
 }
 
-// BootID 本次进程启动标识（批次随附，供主控判 Seq 缺口）。
-func (o *Outbox) BootID() string { return o.bootID }
-
 // Load 启动时加载磁盘上的未确认批次。文件不存在视为空；损坏时隔离现场并继续（返回 error
 // 供调用方告警，但内部状态已可用）。幂等：可重复调用。
 func (o *Outbox) Load() error {

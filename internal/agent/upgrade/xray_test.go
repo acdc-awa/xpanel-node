@@ -144,7 +144,7 @@ func TestVerifyXrayBinaryRejectsBadBinary(t *testing.T) {
 	if err == nil {
 		t.Fatal("期望不可执行的二进制被拒绝")
 	}
-	if !IsProbeError(err) {
+	if _, ok := err.(*probeError); !ok {
 		t.Errorf("期望 probeError，实际 %T", err)
 	}
 }

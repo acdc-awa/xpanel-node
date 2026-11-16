@@ -184,12 +184,6 @@ func (c *Collector) RealtimeSnapshot() Snapshot {
 	return snap
 }
 
-// Snapshot 兼容入口：一次取全体指标。旧主控（未协商快车道）下心跳仍用它，
-// 此时它是唯一的差分写入方，行为与拆分前一致。
-func (c *Collector) Snapshot() Snapshot {
-	return c.RealtimeSnapshot()
-}
-
 // fillConns 填入连接数（内部按 connSampleInterval 缓存，两个入口都调用也不会重复读表）。
 func (c *Collector) fillConns(snap *Snapshot) {
 	est, total, udp, ok := c.connSnapshot(time.Now())

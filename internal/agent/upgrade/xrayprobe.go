@@ -61,9 +61,3 @@ func VerifyXrayBinary(data []byte, wanted string) error {
 type probeError struct{ msg string }
 
 func (e *probeError) Error() string { return e.msg }
-
-// IsProbeError 判断是否为二进制探测失败。
-func IsProbeError(err error) bool {
-	_, ok := err.(*probeError)
-	return ok
-}
