@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acdc-awa/xpanel-node/internal/agent/accounts"
 	"github.com/acdc-awa/xpanel-node/internal/agent/certs"
 	"github.com/acdc-awa/xpanel-node/pkg/protocol"
 )
@@ -57,66 +56,7 @@ func mustMsg(t *testing.T, typ string, payload any) *protocol.Message {
 func setupClient(t *testing.T) *Client {
 	t.Helper()
 	return &Client{
-		Accounts: accounts.New(filepath.Join(t.TempDir(), "internal_accounts.json")),
 		CertsDir: filepath.Join(t.TempDir(), "certs"),
-	}
-}
-
-func TestDispatchSetupInternalAccount(t *testing.T) {
-	c := setupClient(t)
-	res := c.dispatch(mustMsg(t, protocol.MsgSetupInternalAccount, protocol.SetupInternalAccountPayload{Tag: "relay-a"}))
-	if res == nil || !res.OK {
-		t.Fatalf("setup 应成功: %+v", res)
-	}
-	data, ok := res.Data.(protocol.SetupInternalResult)
-	if !ok {
-		t.Fatalf("回执 Data 类型不符: %T", res.Data)
-	}
-	uuid := data.UUID
-	if uuid == "" || data.Tag != "relay-a" {
-		t.Fatalf("回执不符: %+v", data)
-	}
-	// 幂等：再次 setup 返回同一 UUID（不重新生成）
-	res2 := c.dispatch(mustMsg(t, protocol.MsgSetupInternalAccount, protocol.SetupInternalAccountPayload{Tag: "relay-a"}))
-	uuid2 := res2.Data.(protocol.SetupInternalResult).UUID
-	if uuid2 != uuid {
-		t.Errorf("setup 应幂等复用: %s vs %s", uuid, uuid2)
-	}
-	// 持久化验证
-	m, _ := c.Accounts.Load()
-	if m["relay-a"] != uuid {
-		t.Errorf("持久化不符: %v", m)
-	}
-}
-
-func TestDispatchRotateInternalAccount(t *testing.T) {
-	c := setupClient(t)
-	res := c.dispatch(mustMsg(t, protocol.MsgSetupInternalAccount, protocol.SetupInternalAccountPayload{Tag: "relay-a"}))
-	oldUUID := res.Data.(protocol.SetupInternalResult).UUID
-
-	res2 := c.dispatch(mustMsg(t, protocol.MsgRotateInternalAccount, protocol.SetupInternalAccountPayload{Tag: "relay-a"}))
-	if !res2.OK {
-		t.Fatalf("rotate 应成功: %+v", res2)
-	}
-	newUUID := res2.Data.(protocol.SetupInternalResult).UUID
-	if newUUID == "" || newUUID == oldUUID {
-		t.Errorf("rotate 应生成新 UUID: old=%s new=%s", oldUUID, newUUID)
-	}
-	m, _ := c.Accounts.Load()
-	if m["relay-a"] != newUUID {
-		t.Errorf("rotate 后持久化不符: %v", m)
-	}
-}
-
-func TestDispatchSetupErrors(t *testing.T) {
-	c := setupClient(t)
-	if res := c.dispatch(mustMsg(t, protocol.MsgSetupInternalAccount, protocol.SetupInternalAccountPayload{Tag: ""})); res == nil || res.OK {
-		t.Error("空 tag 应失败")
-	}
-	// Accounts 未初始化
-	c2 := &Client{}
-	if res := c2.dispatch(mustMsg(t, protocol.MsgSetupInternalAccount, protocol.SetupInternalAccountPayload{Tag: "a"})); res == nil || res.OK {
-		t.Error("Accounts 为 nil 应失败")
 	}
 }
 

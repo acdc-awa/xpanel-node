@@ -24,9 +24,8 @@ type Config struct {
 	// Default() 再反序列化，存量 agent.yaml 不需要为此改文件）。
 	Metrics      time.Duration `yaml:"metrics_interval"`
 	ReconnectMax time.Duration `yaml:"reconnect_max"` // 重连退避上限
-	// Phase T：内部账户与证书
-	AccountsPath string `yaml:"accounts_path"` // relay 内部账户持久化文件
-	CertsDir     string `yaml:"certs_dir"`     // push_cert 落盘根目录
+	// 证书落盘目录（push_cert / push_ca / sync_certs）
+	CertsDir string `yaml:"certs_dir"`
 	// OutboxPath 流量上报发件箱（审计 F1）：采集到的增量先落盘成批次，收到主控落库回执才删批。
 	// 空 = 纯内存（不落盘，进程重启即丢待上报流量），生产必须给路径。
 	OutboxPath string `yaml:"outbox_path"`
@@ -90,10 +89,9 @@ func Default() *Config {
 			CollectInterval: 30 * time.Second,
 			ReportInterval:  60 * time.Second,
 		},
-		Geo:          geo.DefaultConfig(),
-		AccountsPath: "/etc/xray-agent/internal_accounts.json",
-		CertsDir:     "/etc/xray/certs",
-		OutboxPath:   "/etc/xray-agent/traffic_outbox.json",
+		Geo:        geo.DefaultConfig(),
+		CertsDir:   "/etc/xray/certs",
+		OutboxPath: "/etc/xray-agent/traffic_outbox.json",
 	}
 }
 

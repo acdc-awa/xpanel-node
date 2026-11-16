@@ -12,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/acdc-awa/xpanel-node/internal/agent/accounts"
 	"github.com/acdc-awa/xpanel-node/internal/agent/cli"
 	"github.com/acdc-awa/xpanel-node/internal/agent/client"
 	"github.com/acdc-awa/xpanel-node/internal/agent/collector"
@@ -156,7 +155,6 @@ func main() {
 		Stats:           statsCollector,
 		CollectInterval: cfg.Stats.CollectInterval,
 		ReportInterval:  cfg.Stats.ReportInterval,
-		Accounts:        accounts.New(cfg.AccountsPath),
 		CertsDir:        cfg.CertsDir,
 		Outbox:          outbox.New(cfg.OutboxPath),
 		Upgrade:         &upgrade.Fetcher{Repo: cfg.Update.Repo, Mirror: cfg.Update.Mirror, DownloadTimeout: cfg.Update.DownloadTimeout},

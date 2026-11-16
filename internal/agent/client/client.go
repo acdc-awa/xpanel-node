@@ -15,7 +15,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/acdc-awa/xpanel-node/internal/agent/accounts"
 	"github.com/acdc-awa/xpanel-node/internal/agent/certs"
 	"github.com/acdc-awa/xpanel-node/internal/agent/collector"
 	"github.com/acdc-awa/xpanel-node/internal/agent/outbox"
@@ -56,8 +55,7 @@ type Client struct {
 	Stats           *stats.Collector
 	CollectInterval time.Duration
 	ReportInterval  time.Duration
-	// Phase T：内部账户存储 + 证书落盘目录
-	Accounts *accounts.Store
+	// 证书落盘目录（push_cert / push_ca / sync_certs）
 	CertsDir string
 	// Upgrade 升级源（repo/mirror 来自节点配置 update 段）；nil = 面板触发升级不可用。
 	// SelfRestart 升级完成后的重启回调（systemd 服务内由 main 注入 systemctl restart）；
@@ -1073,8 +1071,6 @@ func (c *Client) dispatch(m *protocol.Message) *protocol.ResultPayload {
 			return &protocol.ResultPayload{OK: false, Error: "读取日志失败: " + err.Error()}
 		}
 		return &protocol.ResultPayload{OK: true, Data: logs}
-	case protocol.MsgSetupInternalAccount, protocol.MsgRotateInternalAccount:
-		return c.handleInternalAccount(m, m.Type == protocol.MsgRotateInternalAccount)
 	case protocol.MsgPushCert:
 		return c.handlePushCert(m)
 	case protocol.MsgPushCA:
@@ -1229,36 +1225,6 @@ func (c *Client) TriggerReconnect() {
 	if ws != nil {
 		_ = ws.Close()
 	}
-}
-
-// handleInternalAccount setup/rotate：节点生成 UUID → 原子持久化 → 回执。
-// setup 幂等（已有则复用）；rotate 强制重新生成。
-func (c *Client) handleInternalAccount(m *protocol.Message, force bool) *protocol.ResultPayload {
-	if c.Accounts == nil {
-		return &protocol.ResultPayload{OK: false, Error: "内部账户存储未初始化"}
-	}
-	var p protocol.SetupInternalAccountPayload
-	if err := m.PayloadTo(&p); err != nil {
-		return &protocol.ResultPayload{OK: false, Error: "解析 internal_account 失败: " + err.Error()}
-	}
-	if p.Tag == "" {
-		return &protocol.ResultPayload{OK: false, Error: "缺少 tag"}
-	}
-	if !force {
-		if m, err := c.Accounts.Load(); err == nil {
-			if uuid, ok := m[p.Tag]; ok && uuid != "" {
-				return &protocol.ResultPayload{OK: true, Data: protocol.SetupInternalResult{Tag: p.Tag, UUID: uuid}}
-			}
-		}
-	}
-	uuid, err := accounts.NewUUID()
-	if err != nil {
-		return &protocol.ResultPayload{OK: false, Error: "生成 UUID 失败: " + err.Error()}
-	}
-	if err := c.Accounts.Set(p.Tag, uuid); err != nil {
-		return &protocol.ResultPayload{OK: false, Error: "持久化失败: " + err.Error()}
-	}
-	return &protocol.ResultPayload{OK: true, Data: protocol.SetupInternalResult{Tag: p.Tag, UUID: uuid}}
 }
 
 // handlePushCert 证书下发：校验 PEM 匹配 → 原子落盘 → 回执。

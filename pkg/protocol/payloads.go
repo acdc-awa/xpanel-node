@@ -220,17 +220,6 @@ type GetLogsPayload struct {
 	Lines int `json:"lines"`
 }
 
-// SetupInternalAccountPayload 主控→节点：为 relay 入站生成（或轮换）内部 UUID。
-type SetupInternalAccountPayload struct {
-	Tag string `json:"tag"`
-}
-
-// SetupInternalResult setup/rotate 回执 data（uuid 由节点生成，主控以此覆盖 DB）。
-type SetupInternalResult struct {
-	Tag  string `json:"tag"`
-	UUID string `json:"uuid"`
-}
-
 // PushCertPayload 主控→节点：TLS 证书下发（agent 校验 PEM 匹配后落盘）。
 type PushCertPayload struct {
 	Domain  string `json:"domain"`
@@ -250,13 +239,6 @@ type PushCAPayload struct {
 // 节点删除 <certs_dir> 下不在该集合中的托管证书目录（只删 push_cert 写出的布局，不碰其它文件）。
 type SyncCertsPayload struct {
 	Domains []string `json:"domains"`
-}
-
-// InternalUUIDReportPayload 节点→主控：内部 UUID 变更主动上报（如 CLI 轮换）。
-// 历史字段：relay 内部账户模型已下线，主控侧接收逻辑已删除、agent 也从不发送，保留仅为协议序号稳定。
-type InternalUUIDReportPayload struct {
-	Tag  string `json:"tag"`
-	UUID string `json:"uuid"`
 }
 
 // UpgradeAgentPayload 主控→节点：升级/回滚 agent 二进制。Target 为空 = 拉取最新 release；Force 为 true = 忽略版本高低强制覆盖（回滚）。

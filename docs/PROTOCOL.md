@@ -32,6 +32,12 @@
 
 ## 3. 消息类型
 
+> **已删除（2026-11-16，agent v0.3.x）**：`setup_internal_account` / `rotate_internal_account` /
+> `internal_uuid_report` 三条消息连同 payload（`SetupInternalAccountPayload` / `SetupInternalResult` /
+> `InternalUUIDReportPayload`）与 agent 侧内部账户存储一并移除。它们只服务于已退役的 relay 入站
+> 内部账号模型，主控自该模型下线后从未发送。旧主控（≤ v0.2.2）即使发送也只会被 agent 当作未知消息
+> 静默丢弃（dispatch 的 default 分支），不发回执。
+
 ### 节点 → 主控
 
 | type | payload | 说明 |
@@ -41,7 +47,6 @@
 | `metrics` | MetricsPayload | **快车道实时指标（2026-11-01）**：CPU / 网速 / 累计网络字节 / 连接数 / 每用户速率，默认 3s（`agent_settings.metrics_interval_sec` 可调）。**只有主控声明 `metrics_split` 能力时才发送**；每一帧都是全量快照、可丢，主控就地覆盖 |
 | `traffic_report` | TrafficReportPayload | 流量批量上报（默认 60s）。带 `batch_id` 的批次，主控落库后回 `traffic_ack` |
 | `result` | ResultPayload | 指令回执，`id` 回填请求 ID |
-| `internal_uuid_report` | InternalUUIDReportPayload | **已废弃（2026-11-04）**：节点从发送过，主控接收端已移除；relay 入站模型退役后无消费方。类型常量保留仅为协议表完整 |
 | `upgrade_progress` | UpgradeProgressPayload | agent 升级进度状态上报（阶段流式通知，2026-09-03 新增） |
 
 ### 主控 → 节点
@@ -53,8 +58,6 @@
 | `restart_xray` | — | 重启 xray 进程 |
 | `get_status` | — | 查询完整状态，回 `result`（data 为 StatusData） |
 | `get_logs` | GetLogsPayload | 拉取最近日志，回 `result`（data 为日志文本） |
-| `setup_internal_account` | SetupInternalAccountPayload | **已废弃（2026-11-04）**：relay 入站模型退役后主控不再发送（旧主控 ≤ v0.2.2 也不会发）；agent 侧 handler 暂时保留以兼容更早主控 |
-| `rotate_internal_account` | SetupInternalAccountPayload | **已废弃（2026-11-04）**：主控端点已删除，同上 |
 | `push_cert` | PushCertPayload | TLS 证书下发（agent 校验 PEM 匹配后落盘） |
 | `push_ca` | PushCAPayload | CA 根证书下发（只有公钥，落盘 `<certs_dir>/ca/<id>.crt`；出站配置以 `certificateFile` 引用）。**旧 agent 会静默丢弃且不回帧**——主控必须先看节点心跳 `caps` 是否含 `push_ca`，未声明时退回内联 PEM |
 | `sync_certs` | SyncCertsPayload | 证书目录 GC：主控下发当前仍被引用的域名全集，节点删除 `<certs_dir>` 下不在集合中的托管证书目录（只删含 `fullchain.pem` 的 `push_cert` 布局，不碰 `ca/` 与人工文件）。需节点声明 `sync_certs` 能力 |
@@ -105,12 +108,9 @@ User               { uuid, email, flow?, level?, limit?, cycle_id? }
 SyncUsersPayload   { users: { "<inbound_tag>": User[] } }
 PushConfigPayload  { config_json }                 // 完整 xray 配置 JSON 字符串
 GetLogsPayload     { lines }
-SetupInternalAccountPayload { tag }
-SetupInternalResult         { tag, uuid }          // uuid 由节点生成，主控以此覆盖 DB
 PushCertPayload    { domain, cert_pem, key_pem }
 PushCAPayload      { id, name?, cert_pem }     // CA 仅公钥；落盘 <certs_dir>/ca/<id>.crt
 SyncCertsPayload   { domains: string[] }       // 证书 GC：保留的托管证书域名全集（空 = 清空全部托管目录）
-InternalUUIDReportPayload { tag, uuid }
 UpgradeAgentPayload { target?, force? }       // target: 空 = 拉取最新 release; force: 强制安装/允许旧版本回滚
 UpgradeProgressPayload { phase, target?, message, error?, ts }
                      // phase: starting/checking/downloading/verifying/replacing/restarting/failed/success

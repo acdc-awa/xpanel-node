@@ -15,8 +15,7 @@ xray:
   # （不压缩、不留多份）。0 = 不限制；不填默认 20（MB）。
   # log_max_size_mb: 20
 
-# 以下三项可不填（代码内有默认值，install-agent.sh 也不写这三项）
-# accounts_path: /etc/xray-agent/internal_accounts.json  # relay 内部账户持久化文件
+# 以下两项可不填（代码内有默认值，install-agent.sh 也不写这两项）
 # certs_dir: /etc/xray/certs                             # push_cert 证书落盘根目录
 # outbox_path: /etc/xray-agent/traffic_outbox.json       # 流量上报发件箱（待主控回执的批次，落盘防重启丢数据）
 
