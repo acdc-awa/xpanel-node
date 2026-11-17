@@ -269,14 +269,6 @@ func (p *Proc) startSync(probe bool) error {
 	return nil
 }
 
-// startProbe 慢探底：与 Start 同一套启动流程，区别只在失败路径——只更新失败原因与下次
-// 探底时刻，不计入连续失败、不重复投递放弃告警（面板上"连续失败 N 次"停在放弃那一刻）。
-func (p *Proc) startProbe() error {
-	p.opMu.Lock()
-	defer p.opMu.Unlock()
-	return p.startSync(true)
-}
-
 // notifyStarted 在锁外投递「xray 已按 ConfigPath 起来」。回调会读配置文件并取别的锁
 // （agent 用它重建用户缓存），持锁调用会与 Stop/Start 互等；与放弃告警同样是
 // 「锁内置位、锁外投递」的写法。
