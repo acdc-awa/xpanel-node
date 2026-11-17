@@ -82,17 +82,15 @@ case "$(uname -m)" in
 esac
 ASSET="xray-agent-linux-${ARCH}"
 
-# agent 下载地址推导：默认 GitHub Releases（latest 或钉版本），镜像前缀可注入
-GH_BASE="${AGENT_MIRROR:-https://github.com}"
-GH_BASE="${GH_BASE%/}"
+# agent 下载地址推导：保持 canonical github.com URL，由 download_with_fallback 优先尝试 --agent-mirror 并回退内置镜像链
 if [[ -z "$AGENT_URL" && -z "$AGENT_FILE" ]]; then
   if [[ -n "$AGENT_VERSION" ]]; then
     CHANNEL="download/${AGENT_VERSION}"
   else
     CHANNEL="latest/download"
   fi
-  AGENT_URL="${GH_BASE}/${GH_REPO}/releases/${CHANNEL}/${ASSET}"
-  CHECKSUMS_URL="${GH_BASE}/${GH_REPO}/releases/${CHANNEL}/checksums.txt"
+  AGENT_URL="https://github.com/${GH_REPO}/releases/${CHANNEL}/${ASSET}"
+  CHECKSUMS_URL="https://github.com/${GH_REPO}/releases/${CHANNEL}/checksums.txt"
 else
   CHECKSUMS_URL=""
 fi

@@ -117,6 +117,7 @@ type Proc struct {
 	// 不再每次把日志文件读进内存。由 New 初始化。
 	memTail *logTail
 
+	opMu      sync.Mutex // 串行化启停/落盘/回滚操作（锁序严格 opMu -> mu），防 RestartWithConfig / WriteConfigIfValid / Watchdog 交叉竞争 ConfigPath
 	mu        sync.Mutex
 	run       *run
 	started   bool // 是否曾启动（用于看门狗判定"崩溃后拉起"）
@@ -252,8 +253,14 @@ func (p *Proc) CleanupStale() {
 // 返回 nil 表示"确实起来了"：spawn 成功且进程活过了就绪窗口；秒死则返回带退出码与
 // stderr 摘要的错误（并计入连续失败计数）。
 func (p *Proc) Start() error {
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+	return p.startSync(false)
+}
+
+func (p *Proc) startSync(probe bool) error {
 	p.mu.Lock()
-	err := p.startLocked(false)
+	err := p.startLocked(probe)
 	p.mu.Unlock()
 	if err != nil {
 		return err
@@ -265,14 +272,9 @@ func (p *Proc) Start() error {
 // startProbe 慢探底：与 Start 同一套启动流程，区别只在失败路径——只更新失败原因与下次
 // 探底时刻，不计入连续失败、不重复投递放弃告警（面板上"连续失败 N 次"停在放弃那一刻）。
 func (p *Proc) startProbe() error {
-	p.mu.Lock()
-	err := p.startLocked(true)
-	p.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	p.notifyStarted()
-	return nil
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+	return p.startSync(true)
 }
 
 // notifyStarted 在锁外投递「xray 已按 ConfigPath 起来」。回调会读配置文件并取别的锁
@@ -375,6 +377,12 @@ func (p *Proc) startLocked(probe bool) error {
 
 // Stop 停止 xray（SIGTERM 优雅退出，超时后 SIGKILL）。
 func (p *Proc) Stop() error {
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
+	return p.stopSync()
+}
+
+func (p *Proc) stopSync() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.started = false
@@ -423,6 +431,8 @@ func (p *Proc) RestartWithConfig(configJSON string) error {
 	if err := p.rejectRepeat(hash); err != nil {
 		return err
 	}
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(p.ConfigPath), 0o755); err != nil {
 		return err
 	}
@@ -445,17 +455,17 @@ func (p *Proc) RestartWithConfig(configJSON string) error {
 	}
 	// 新配置给一次干净的失败预算（否则上次的放弃态会立刻压制它）
 	p.ResetFailures()
-	if err := p.Stop(); err != nil {
+	if err := p.stopSync(); err != nil {
 		return err
 	}
-	if err := p.Start(); err != nil {
+	if err := p.startSync(false); err != nil {
 		// 记下"这份内容起不来"：冷却期内主控重推同一份内容会被直接拒绝（不再反复停服）
 		p.noteRejected(hash, err)
 		// 启动失败：回滚到上一份好配置并再试一次
 		if _, serr := os.Stat(p.ConfigPath + ".bak"); serr == nil {
 			_ = os.Rename(p.ConfigPath+".bak", p.ConfigPath)
-			_ = p.Stop()
-			if rerr := p.Start(); rerr == nil {
+			_ = p.stopSync()
+			if rerr := p.startSync(false); rerr == nil {
 				return fmt.Errorf("新配置无法启动（%v），已回滚到上一份配置", err)
 			}
 			return err
@@ -491,6 +501,8 @@ func (p *Proc) WriteConfigIfValid(configJSON string) error {
 	if configJSON == "" {
 		return nil
 	}
+	p.opMu.Lock()
+	defer p.opMu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(p.ConfigPath), 0o755); err != nil {
 		return err
 	}
@@ -605,8 +617,14 @@ func (p *Proc) Watchdog(stop <-chan struct{}) {
 }
 
 // check 一个看门狗周期：吸收退出信息 → 判定是否需要拉起（退避中不动手；已放弃则走慢探底）。
+// 若 RestartWithConfig / WriteConfigIfValid 正持有 opMu，直接跳过本拍，避免在半途回滚或换盘期间抢占 ConfigPath。
 func (p *Proc) check() {
 	p.dispatchGiveUpNotice() // 先投递上一拍遗留的告警
+	if !p.opMu.TryLock() {
+		return
+	}
+	defer p.opMu.Unlock()
+
 	p.mu.Lock()
 	if !p.started {
 		p.mu.Unlock()
@@ -654,11 +672,11 @@ func (p *Proc) check() {
 	if gaveUp {
 		// 慢探底：放弃自动拉起后仍按 probeInterval 试一次。失败不计数、不重复告警，
 		// 环境类故障（开机期端口被占等）修好后无需人工介入即可自愈。
-		if err := p.startProbe(); err != nil {
+		if err := p.startSync(true); err != nil {
 			log.Printf("xrayproc: xray 慢探底失败（保持停止自动拉起，%s 后再试）: %v", probeInterval, err)
 			return
 		}
-	} else if err := p.Start(); err != nil {
+	} else if err := p.startSync(false); err != nil {
 		p.mu.Lock()
 		failures, gaveUpNow := p.failures, p.gaveUp
 		p.mu.Unlock()
@@ -717,7 +735,7 @@ func (p *Proc) tryGoodRollback() bool {
 	p.ResetFailures()
 	p.markGoodTried()
 	log.Printf("xrayproc: 连续启动失败达上限，已回退到上一份可用配置（%s）并重试", good)
-	if err := p.Start(); err != nil {
+	if err := p.startSync(false); err != nil {
 		reason := fmt.Sprintf("回退到上一份可用配置后仍启动失败: %v", err)
 		log.Printf("xrayproc: %s", reason)
 		p.markGaveUp(reason)

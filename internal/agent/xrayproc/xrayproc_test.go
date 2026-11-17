@@ -552,3 +552,22 @@ func TestOwnedPIDsFindsConfigProcess(t *testing.T) {
 		t.Fatal("自身不应被认领")
 	}
 }
+
+// TestCheckSkipsWhenOpMuHeld 验证 RestartWithConfig/WriteConfigIfValid 持锁期间，Watchdog.check() 不会抢占操作 ConfigPath。
+func TestCheckSkipsWhenOpMuHeld(t *testing.T) {
+	shortTiming(t)
+	p := fakeProc(t, `{"inbounds":[{"port":443}]}`)
+	p.mu.Lock()
+	p.started = true
+	p.failures = 0
+	p.mu.Unlock()
+
+	// 模拟 RestartWithConfig 正持有 opMu（例如正在 Stop/Start/.bak 回滚）
+	p.opMu.Lock()
+	p.check()
+	p.opMu.Unlock()
+
+	if h := p.Health(); h.Failures != 0 {
+		t.Fatalf("持 opMu 期间 check() 应跳过，不应修改失败计数, got %d", h.Failures)
+	}
+}
